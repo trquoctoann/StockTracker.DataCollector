@@ -18,8 +18,8 @@ dependencies = [
     "pydantic-settings",
     "structlog",
     "tenacity",
-    "uvicorn",
-    "vnstock",
+    "uvicorn[standard]",
+    "vnstock==4.0.7",
 ]
 
 [dependency-groups]
@@ -47,6 +47,8 @@ known-first-party = ["app", "tests"]
 quote-style = "double"
 
 [tool.pyright]
+venvPath = "."
+venv = ".venv"
 include = ["app", "tests"]
 exclude = [".venv"]
 pythonVersion = "3.12"

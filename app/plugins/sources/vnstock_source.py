@@ -1,30 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from datetime import date, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from vnstock import INDEX_GROUPS, INDICES_INFO, Company, Listing, Quote
+import structlog
 
 from app.core.config import Settings
+from app.core.exceptions import SourceError
 from app.core.rate_limiter import RateLimiterRegistry
 from app.interfaces.base_source import BaseSource
 
-VnstockOperation = Literal[
-    "industries_icb",
-    "symbols_by_exchange",
-    "symbols_by_group",
-    "indices_catalog",
-    "company_overview",
-    "company_shareholders",
-    "company_officers",
-    "company_subsidiaries",
-    "company_events",
-    "company_news",
-    "quote_history",
-    "quote_intraday",
-]
+_LOG = structlog.get_logger(__name__)
+_COMPANY_METHODS = {
+    "company_overview": "info",
+    "company_shareholders": "shareholders",
+    "company_officers": "officers",
+    "company_subsidiaries": "subsidiaries",
+    "company_events": "events",
+    "company_news": "news",
+}
 
 
 @dataclass(frozen=True)
@@ -37,180 +36,193 @@ class IndexBasketRow:
 
 
 class VnstockSource(BaseSource):
+    """Adapter for the pinned vnstock Unified UI, isolated from pipeline contracts.
+
+    Import and construct the SDK in a worker: vnstock import itself can do I/O.
+    Unit tests and the health endpoint must not initialize the provider.
+    """
+
     def __init__(self, settings: Settings, rate_limiter: RateLimiterRegistry) -> None:
         self._settings = settings
         self._rate_limiter = rate_limiter
-        self._source_key = "vnstock"
 
-    def _listing_vci(self) -> Listing:
-        return Listing(source="VCI")
+    @staticmethod
+    def _reference() -> Any:
+        from vnstock import Reference
 
-    def _company_vci(self, symbol: str) -> Company:
-        return Company(symbol=symbol, source="VCI")
+        return Reference()
 
-    def _quote_vci(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, source="VCI")
+    @staticmethod
+    def _market() -> Any:
+        from vnstock import Market
+
+        return Market()
+
+    @staticmethod
+    def _index_metadata() -> tuple[dict[str, list[str]], dict[str, Any]]:
+        from vnstock import INDEX_GROUPS, INDICES_INFO
+
+        return INDEX_GROUPS, INDICES_INFO
+
+    @staticmethod
+    async def _run_in_thread(func: Callable[[], Any]) -> Any:
+        def invoke() -> Any:
+            # Convert SystemExit inside the thread before asyncio sees it.
+            # Cancellation and KeyboardInterrupt must still propagate.
+            try:
+                return func()
+            except SystemExit as exc:
+                raise SourceError(f"vnstock terminated the request: {exc}") from exc
+
+        return await asyncio.to_thread(invoke)
+
+    async def _call(self, operation: str, func: Callable[[], Any]) -> Any:
+        await self._rate_limiter.acquire("vnstock")
+        try:
+            return await self._run_in_thread(func)
+        except SourceError:
+            raise
+        except Exception as exc:
+            raise SourceError(f"vnstock {operation} failed: {exc}") from exc
+
+    @staticmethod
+    def _frame(raw: Any, operation: str, *, allow_empty: bool = True) -> pd.DataFrame:
+        if not isinstance(raw, pd.DataFrame):
+            raise SourceError(f"vnstock {operation}: expected DataFrame, got {type(raw).__name__}")
+        if not allow_empty and raw.empty:
+            raise SourceError(f"vnstock {operation}: empty snapshot; refusing destructive sync")
+        return raw
 
     async def extract(self, **kwargs: Any) -> Any:
-        operation: VnstockOperation = kwargs["operation"]
-        if operation == "industries_icb":
-            return await self._industries_icb()
-        if operation == "symbols_by_exchange":
-            return await self._symbols_by_exchange()
-        if operation == "symbols_by_group":
-            group = str(kwargs["group"])
-            return await self._symbols_by_group(group)
+        operation = kwargs["operation"]
         if operation == "indices_catalog":
             return await self._build_indices_catalog()
-        if operation == "company_overview":
-            return await self._company_overview(str(kwargs["symbol"]))
-        if operation == "company_shareholders":
-            return await self._company_shareholders(str(kwargs["symbol"]))
-        if operation == "company_officers":
-            return await self._company_officers(str(kwargs["symbol"]))
-        if operation == "company_subsidiaries":
-            return await self._company_subsidiaries(str(kwargs["symbol"]))
-        if operation == "company_events":
-            return await self._company_events(str(kwargs["symbol"]))
-        if operation == "company_news":
-            return await self._company_news(str(kwargs["symbol"]))
+        if operation == "symbols_by_group":
+            return await self._symbols_by_group(str(kwargs["group"]))
+        if operation == "industries_icb":
+            raw = await self._call(operation, lambda: self._reference().industry.list(source="vci"))
+            return self._frame(raw, operation, allow_empty=False)
+        if operation == "symbols_by_exchange":
+            raw = await self._call(
+                operation,
+                lambda: self._reference().equity.list_by_exchange(source=self._settings.vnstock_listing_source.lower()),
+            )
+            return self._frame(raw, operation, allow_empty=False)
+        if operation in _COMPANY_METHODS:
+            symbol = str(kwargs["symbol"]).strip().upper()
+            raw = await self._call(
+                operation,
+                lambda: getattr(self._reference().company(symbol), _COMPANY_METHODS[operation])(
+                    source=self._settings.vnstock_company_source.lower()
+                ),
+            )
+            # Snapshot sync can delete records. Empty may mean a swallowed SDK
+            # error; it is never authority to clear previously stored data.
+            frame = self._frame(raw, operation, allow_empty=False)
+            frame.attrs["source"] = self._settings.vnstock_company_source
+            return frame
         if operation == "quote_history":
-            return await self._quote_history(str(kwargs["symbol"]), str(kwargs.get("interval", "1D")))
+            return await self._quote_history(
+                str(kwargs["symbol"]),
+                str(kwargs.get("interval", self._settings.vnstock_price_history_interval)),
+                kwargs.get("start"),
+                kwargs.get("end"),
+            )
         if operation == "quote_intraday":
             return await self._quote_intraday(str(kwargs["symbol"]))
-        raise ValueError(f"Unknown operation: {operation}")
-
-    # -----------------------------------------------------------------------
-    # Listing operations (existing)
-    # -----------------------------------------------------------------------
-
-    async def _industries_icb(self) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._listing_vci().industries_icb()
-
-        return await asyncio.to_thread(_load)
-
-    async def _symbols_by_exchange(self) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._listing_vci().symbols_by_exchange()
-
-        return await asyncio.to_thread(_load)
+        raise SourceError(f"Unknown vnstock operation: {operation}")
 
     async def _symbols_by_group(self, group: str) -> pd.Series:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.Series:
-            return self._listing_vci().symbols_by_group(group=group)
-
-        return await asyncio.to_thread(_load)
-
-    def _collect_index_symbols(self) -> list[tuple[str, str | None]]:
-        seen: set[str] = set()
-        ordered: list[tuple[str, str | None]] = []
-        for gname in self._settings.vnstock_index_group_names:
-            for sym in INDEX_GROUPS.get(gname, []):
-                if sym not in seen:
-                    seen.add(sym)
-                    ordered.append((sym, gname))
-        for sym in self._settings.vnstock_extra_index_symbols:
-            if sym not in seen:
-                seen.add(sym)
-                ordered.append((sym, None))
-        return ordered
+        provider = self._settings.vnstock_indices_source.lower()
+        aliases = {"VNMID": "VNMidCap", "VNSML": "VNSmallCap", "VNINDEX": "HOSE"}
+        provider_group = aliases.get(group, group) if provider == "kbs" else group
+        raw = await self._call(
+            "symbols_by_group",
+            lambda: self._reference().equity.list_by_group(group=provider_group, source=provider),
+        )
+        if isinstance(raw, pd.DataFrame) and "symbol" in raw:
+            raw = raw["symbol"]
+        if not isinstance(raw, pd.Series) or raw.empty or raw.isna().any():
+            raise SourceError(f"vnstock index {group}: invalid or empty constituents")
+        result = raw.astype(str).str.strip().str.upper()
+        if result.eq("").any():
+            raise SourceError(f"vnstock index {group}: blank constituent symbol")
+        return result.drop_duplicates().reset_index(drop=True)
 
     async def _build_indices_catalog(self) -> list[IndexBasketRow]:
-        rows: list[IndexBasketRow] = []
-        for sym, gname in self._collect_index_symbols():
-            info = INDICES_INFO.get(sym, {})
-            name = str(info.get("name", sym))
-            desc = info.get("description")
-            description = str(desc) if desc is not None else None
-            group = str(info.get("group", gname)) if info.get("group") or gname else None
-            series = await self._symbols_by_group(sym)
-            constituents = [str(x).strip().upper() for x in series.tolist()]
+        groups, metadata = await self._run_in_thread(self._index_metadata)
+        symbols: dict[str, str | None] = {}
+        for group in self._settings.vnstock_index_group_names:
+            if group not in groups:
+                raise SourceError(f"Unknown vnstock index group: {group}")
+            for symbol in groups[group]:
+                symbols.setdefault(symbol, group)
+        for symbol in self._settings.vnstock_extra_index_symbols:
+            symbols.setdefault(symbol, None)
+        rows = []
+        for symbol, group in symbols.items():
+            info = metadata.get(symbol, {})
+            # Fail atomically instead of publishing an empty/partial basket.
+            members = await self._symbols_by_group(symbol)
             rows.append(
                 IndexBasketRow(
-                    symbol=sym,
-                    name=name,
-                    description=description,
-                    group=group,
-                    constituent_symbols=constituents,
+                    symbol=symbol,
+                    name=str(info.get("name", symbol)),
+                    description=info.get("description"),
+                    group=info.get("group", group),
+                    constituent_symbols=members.tolist(),
                 )
             )
         return rows
 
-    # -----------------------------------------------------------------------
-    # Company operations (Phase 2)
-    # -----------------------------------------------------------------------
-
-    async def _company_overview(self, symbol: str) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._company_vci(symbol).overview()
-
-        return await asyncio.to_thread(_load)
-
-    async def _company_shareholders(self, symbol: str) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._company_vci(symbol).shareholders()
-
-        return await asyncio.to_thread(_load)
-
-    async def _company_officers(self, symbol: str) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._company_vci(symbol).officers()
-
-        return await asyncio.to_thread(_load)
-
-    async def _company_subsidiaries(self, symbol: str) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._company_vci(symbol).subsidiaries()
-
-        return await asyncio.to_thread(_load)
-
-    async def _company_events(self, symbol: str) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._company_vci(symbol).events()
-
-        return await asyncio.to_thread(_load)
-
-    async def _company_news(self, symbol: str) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._company_vci(symbol).news()
-
-        return await asyncio.to_thread(_load)
-
-    # -----------------------------------------------------------------------
-    # Quote operations (Phase 3)
-    # -----------------------------------------------------------------------
-
-    async def _quote_history(self, symbol: str, interval: str = "1D") -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._quote_vci(symbol).history(interval=interval)
-
-        return await asyncio.to_thread(_load)
+    async def _quote_history(
+        self, symbol: str, interval: str, start: str | date | None, end: str | date | None
+    ) -> pd.DataFrame:
+        today = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date()
+        end_date = date.fromisoformat(str(end or self._settings.vnstock_history_end or today))
+        default_start = end_date - timedelta(days=self._settings.vnstock_history_lookback_days)
+        start_date = date.fromisoformat(str(start or self._settings.vnstock_history_start or default_start))
+        if start_date > end_date:
+            raise SourceError("vnstock history start must not be after end")
+        provider_interval = "1H" if interval == "1h" and self._settings.vnstock_quote_source == "VCI" else interval
+        raw = await self._call(
+            "quote_history",
+            lambda: (
+                self._market()
+                .equity(symbol.strip().upper())
+                .ohlcv(
+                    start=start_date.isoformat(),
+                    end=end_date.isoformat(),
+                    interval=provider_interval,
+                    count=None,
+                    source=self._settings.vnstock_quote_source.lower(),
+                )
+            ),
+        )
+        return self._frame(raw, "quote_history", allow_empty=False)
 
     async def _quote_intraday(self, symbol: str) -> pd.DataFrame:
-        await self._rate_limiter.acquire(self._source_key)
-
-        def _load() -> pd.DataFrame:
-            return self._quote_vci(symbol).intraday()
-
-        return await asyncio.to_thread(_load)
+        frames = []
+        page_size = self._settings.vnstock_intraday_page_size
+        for page in range(1, self._settings.vnstock_intraday_max_pages + 1):
+            raw = await self._call(
+                "quote_intraday",
+                lambda page=page: (
+                    self._market()
+                    .equity(symbol.strip().upper())
+                    .trades(page=page, page_size=page_size, source=self._settings.vnstock_quote_source.lower())
+                ),
+            )
+            frame = self._frame(raw, "quote_intraday")
+            if frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < page_size:
+                break
+        else:
+            _LOG.warning("VNSTOCK_INTRADAY_WINDOW_LIMIT", symbol=symbol, max_pages=len(frames))
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True)
+        result.attrs = dict(frames[0].attrs)
+        return result
