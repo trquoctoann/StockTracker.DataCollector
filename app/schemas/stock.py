@@ -9,4 +9,5 @@ class Stock(BaseModel):
     short_name: str | None = None
     exchange: str = Field(..., description="HOSE, HNX, UPCOM")
     type: str = Field(..., description="STOCK, ETF, FUND, ...")
-    industry_ids: list[int] = Field(default_factory=list)
+    # None preserves existing relationships when the provider has no ICB data.
+    industry_ids: list[int] | None = None

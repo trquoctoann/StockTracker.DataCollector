@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 from pydantic import BaseModel, Field
 
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 class CompanyProfileSync(BaseModel):
     stock_id: int
-    symbol: str | None = None
+    symbol: str | None = None  # Required by API when sent to StockTracker.API
     business_model: str | None = None
     founded_date: date | None = None
     charter_capital: float | None = None
@@ -33,7 +33,7 @@ class CompanyProfileSync(BaseModel):
     fax: str | None = None
     email: str | None = None
     website: str | None = None
-    branches: str | None = None
+    branches: int | None = None  # API expects int (number of branches)
     history: str | None = None
 
 
@@ -41,6 +41,7 @@ class CompanyProfileSync(BaseModel):
 # Company Shareholder
 # ---------------------------------------------------------------------------
 class CompanyShareholderRecord(BaseModel):
+    data_source_id: str | None = None
     name: str
     quantity: int | None = None
     ownership_percent: float | None = None
@@ -49,13 +50,18 @@ class CompanyShareholderRecord(BaseModel):
 
 class CompanyShareholderSync(BaseModel):
     stock_id: int
-    records: list[CompanyShareholderRecord] = Field(default_factory=list)
+    items: list[CompanyShareholderRecord] = Field(default_factory=list)
+
+    @property
+    def records(self) -> list[CompanyShareholderRecord]:
+        return self.items
 
 
 # ---------------------------------------------------------------------------
 # Company Officer
 # ---------------------------------------------------------------------------
 class CompanyOfficerRecord(BaseModel):
+    data_source_id: str | None = None
     name: str
     position: str | None = None
     ownership_percent: float | None = None
@@ -65,13 +71,18 @@ class CompanyOfficerRecord(BaseModel):
 
 class CompanyOfficerSync(BaseModel):
     stock_id: int
-    records: list[CompanyOfficerRecord] = Field(default_factory=list)
+    items: list[CompanyOfficerRecord] = Field(default_factory=list)
+
+    @property
+    def records(self) -> list[CompanyOfficerRecord]:
+        return self.items
 
 
 # ---------------------------------------------------------------------------
 # Company Affiliation (subsidiaries)
 # ---------------------------------------------------------------------------
 class CompanyAffiliationRecord(BaseModel):
+    data_source_id: str | None = None
     code: str | None = None
     name: str
     type: str | None = Field(None, description="SUBSIDIARY, AFFILIATED, JOINT_VENTURE")
@@ -80,16 +91,21 @@ class CompanyAffiliationRecord(BaseModel):
 
 class CompanyAffiliationSync(BaseModel):
     stock_id: int
-    records: list[CompanyAffiliationRecord] = Field(default_factory=list)
+    items: list[CompanyAffiliationRecord] = Field(default_factory=list)
+
+    @property
+    def records(self) -> list[CompanyAffiliationRecord]:
+        return self.items
 
 
 # ---------------------------------------------------------------------------
 # Company Event
 # ---------------------------------------------------------------------------
 class CompanyEventRecord(BaseModel):
+    data_source_id: str | None = None
     title: str
-    public_date: datetime | None = None
-    issue_date: datetime | None = None
+    public_date: date | None = None
+    issue_date: date | None = None
     source_url: str | None = None
     record_date: date | None = None
     exright_date: date | None = None
@@ -97,21 +113,30 @@ class CompanyEventRecord(BaseModel):
 
 class CompanyEventSync(BaseModel):
     stock_id: int
-    records: list[CompanyEventRecord] = Field(default_factory=list)
+    items: list[CompanyEventRecord] = Field(default_factory=list)
+
+    @property
+    def records(self) -> list[CompanyEventRecord]:
+        return self.items
 
 
 # ---------------------------------------------------------------------------
 # Company News
 # ---------------------------------------------------------------------------
 class CompanyNewsRecord(BaseModel):
+    data_source_id: str | None = None
     title: str
     image_url: str | None = None
     source_url: str | None = None
-    public_date: datetime | None = None
+    public_date: date | None = None
     language: str | None = None
     price_change_percent: float | None = None
 
 
 class CompanyNewsSync(BaseModel):
     stock_id: int
-    records: list[CompanyNewsRecord] = Field(default_factory=list)
+    items: list[CompanyNewsRecord] = Field(default_factory=list)
+
+    @property
+    def records(self) -> list[CompanyNewsRecord]:
+        return self.items

@@ -1,27 +1,24 @@
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import pandas as pd
 
+from app.core.exceptions import SourceError
 from app.interfaces.base_processor import BaseProcessor
+from app.plugins.processors.pandas_utils import clean_str as _clean_str
 from app.plugins.sources.vnstock_source import IndexBasketRow
 from app.schemas.industry import Industry
 from app.schemas.market_index import MarketIndex
 from app.schemas.stock import Stock
 
 
-def _clean_str(v: object) -> str | None:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return None
-    s = str(v).strip()
-    return s or None
-
-
 def _normalize_exchange(raw: object) -> str:
     s = str(raw).strip().upper()
-    if s in {"HOSE", "HNX", "UPCOM"}:
+    # KBS uses "HOSE" for the HSX exchange; map to canonical enum value "HSX"
+    if s == "HOSE":
+        return "HSX"
+    if s in {"HSX", "HNX", "UPCOM", "DELISTED", "BOND"}:
         return s
     return s
 
@@ -32,6 +29,7 @@ def _normalize_type(raw: object) -> str:
         "STOCK": "STOCK",
         "ETF": "ETF",
         "UNIT_TRUST": "FUND",
+        "FUND": "FUND",
     }
     return mapping.get(s, s)
 
@@ -62,7 +60,13 @@ class ListingPandasProcessor(BaseProcessor):
     def transform_stocks(self, df: pd.DataFrame, industry_code_to_id: dict[str, int]) -> list[Stock]:
         if df.empty:
             return []
-        allowed_types = ["STOCK", "ETF", "UNIT_TRUST"]
+        required = {"symbol", "organ_name", "exchange", "type"}
+        if missing := required - set(df.columns):
+            raise SourceError(f"Listing schema missing columns: {sorted(missing)}")
+        # Normalize type to uppercase to handle both VCI and KBS source conventions
+        df = df.copy()
+        df["type"] = df["type"].str.upper()
+        allowed_types = ["STOCK", "ETF", "UNIT_TRUST", "FUND"]
         work = df.loc[df["type"].isin(allowed_types)].dropna(subset=["symbol", "organ_name"], how="any").copy()
         items: list[Stock] = []
         for _, row in work.iterrows():
@@ -75,11 +79,11 @@ class ListingPandasProcessor(BaseProcessor):
             typ = _normalize_type(row.get("type"))
             icb_raw = row.get("icb_code2")
             icb: str | None
-            if icb_raw is None or (isinstance(icb_raw, float) and math.isnan(icb_raw)):
+            if icb_raw is None or pd.isna(icb_raw):
                 icb = None
             else:
-                icb = _clean_str(icb_raw)
-            industry_ids: list[int] = []
+                icb = str(int(icb_raw)) if isinstance(icb_raw, float) and icb_raw.is_integer() else _clean_str(icb_raw)
+            industry_ids: list[int] | None = None
             if icb is not None and icb in industry_code_to_id:
                 industry_ids = [industry_code_to_id[icb]]
             items.append(
@@ -101,6 +105,9 @@ class ListingPandasProcessor(BaseProcessor):
     ) -> list[MarketIndex]:
         out: list[MarketIndex] = []
         for b in baskets:
+            missing = set(b.constituent_symbols) - stock_symbol_to_id.keys()
+            if missing or not b.constituent_symbols:
+                raise SourceError(f"Index {b.symbol}: incomplete stock mapping: {sorted(missing)}")
             stock_ids: list[int] = []
             for s in b.constituent_symbols:
                 sid = stock_symbol_to_id.get(s)

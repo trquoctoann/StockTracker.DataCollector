@@ -11,7 +11,7 @@ class PriceHistoryInterval(StrEnum):
     FIVE_MINUTES = "5m"
     FIFTEEN_MINUTES = "15m"
     THIRTY_MINUTES = "30m"
-    ONE_HOUR = "1H"
+    ONE_HOUR = "1h"  # Must match API PriceInterval.ONE_HOUR = "1h" (lowercase)
     ONE_DAY = "1D"
     ONE_WEEK = "1W"
     ONE_MONTH = "1M"
@@ -26,7 +26,7 @@ class StockPriceHistoryRecord(BaseModel):
     high: float
     low: float
     close: float
-    volume: int
+    volume: float  # API UpsertStockPriceHistoryCommand uses float
     stock_id: int
 
 
@@ -42,8 +42,8 @@ class StockPriceHistorySync(BaseModel):
 class StockIntradayRecord(BaseModel):
     time: datetime
     price: float
-    volume: int
-    match_type: str | None = Field(None, description="BUY or SELL")
+    volume: float  # API UpsertStockIntradayCommand uses float
+    match_type: str | None = Field(None, description="BUY or SELL – must match API MatchType enum")
     data_source_id: str | None = None
     stock_id: int
 

@@ -1,12 +1,26 @@
 from __future__ import annotations
 
-import math
-from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 
 from app.interfaces.base_processor import BaseProcessor
+from app.plugins.processors.pandas_utils import (
+    clean_date as _clean_date,
+)
+from app.plugins.processors.pandas_utils import (
+    clean_float as _clean_float,
+)
+from app.plugins.processors.pandas_utils import (
+    clean_int as _clean_int,
+)
+from app.plugins.processors.pandas_utils import (
+    clean_str as _clean_str,
+)
+from app.plugins.processors.pandas_utils import (
+    normalize_columns,
+    record_id,
+)
 from app.schemas.company import (
     CompanyAffiliationRecord,
     CompanyAffiliationSync,
@@ -20,67 +34,6 @@ from app.schemas.company import (
     CompanyShareholderRecord,
     CompanyShareholderSync,
 )
-
-
-def _clean_str(v: object) -> str | None:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return None
-    s = str(v).strip()
-    return s or None
-
-
-def _clean_float(v: object) -> float | None:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return None
-    try:
-        return float(v)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
-def _clean_int(v: object) -> int | None:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return None
-    try:
-        return int(float(v))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
-def _clean_date(v: object) -> date | None:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return None
-    if isinstance(v, datetime):
-        return v.date()
-    if isinstance(v, date):
-        return v
-    s = str(v).strip()
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _clean_datetime(v: object) -> datetime | None:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return None
-    if isinstance(v, datetime):
-        return v
-    if isinstance(v, date):
-        return datetime.combine(v, datetime.min.time())
-    s = str(v).strip()
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
 
 
 def _safe_get(row: Any, col: str) -> Any:
@@ -97,13 +50,28 @@ class CompanyPandasProcessor(BaseProcessor):
     def process(self, raw: object, **kwargs: Any) -> object:
         raise NotImplementedError("Use transform_profile / transform_shareholders / transform_officers / etc.")
 
-    def transform_profile(self, stock_id: int, df: pd.DataFrame) -> CompanyProfileSync:
+    def transform_profile(self, stock_id: int, df: pd.DataFrame, symbol: str = "") -> CompanyProfileSync:
         if df.empty:
-            return CompanyProfileSync(stock_id=stock_id)
+            return CompanyProfileSync(stock_id=stock_id, symbol=_clean_str(symbol))
+        df = normalize_columns(
+            df,
+            {
+                "listed_volume": "listing_volume",
+                "num_employees": "number_of_employees",
+                "company_profile": "business_model",
+            },
+            set(),
+        )
+        if str(df.attrs.get("source", "")).upper() == "KBS":
+            # KBS CC/VL are rounded display units, not canonical VND/shares.
+            # Omit until a verified unit contract exists; never guess scaling.
+            df = df.drop(columns=["charter_capital", "listing_volume"], errors="ignore")
         row = df.iloc[0]
+        # symbol from vnstock overview, fallback to the symbol passed from stock_map
+        raw_symbol = _clean_str(_safe_get(row, "symbol")) or symbol
         return CompanyProfileSync(
             stock_id=stock_id,
-            symbol=_clean_str(_safe_get(row, "symbol")),
+            symbol=raw_symbol,
             business_model=_clean_str(_safe_get(row, "business_model")),
             founded_date=_clean_date(_safe_get(row, "founded_date")),
             charter_capital=_clean_float(_safe_get(row, "charter_capital")),
@@ -126,13 +94,24 @@ class CompanyPandasProcessor(BaseProcessor):
             fax=_clean_str(_safe_get(row, "fax")),
             email=_clean_str(_safe_get(row, "email")),
             website=_clean_str(_safe_get(row, "website")),
-            branches=_clean_str(_safe_get(row, "branches")),
+            branches=_clean_int(_safe_get(row, "branches")),
             history=_clean_str(_safe_get(row, "history")),
         )
 
     def transform_shareholders(self, stock_id: int, df: pd.DataFrame) -> CompanyShareholderSync:
         if df.empty:
             return CompanyShareholderSync(stock_id=stock_id)
+        df = normalize_columns(
+            df,
+            {
+                "share_holder": "name",
+                "shares_owned": "quantity",
+                "ownership_percentage": "ownership_percent",
+                "share_own_percent": "ownership_percent",
+                "update_date": "updated_date",
+            },
+            {"name"},
+        )
         records: list[CompanyShareholderRecord] = []
         for _, row in df.iterrows():
             name = _clean_str(row.get("name"))
@@ -140,17 +119,29 @@ class CompanyPandasProcessor(BaseProcessor):
                 continue
             records.append(
                 CompanyShareholderRecord(
+                    data_source_id=record_id(row, df, "shareholder", name),
                     name=name,
                     quantity=_clean_int(row.get("quantity")),
                     ownership_percent=_clean_float(row.get("ownership_percent")),
                     updated_date=_clean_date(row.get("updated_date")),
                 )
             )
-        return CompanyShareholderSync(stock_id=stock_id, records=records)
+        return CompanyShareholderSync(stock_id=stock_id, items=records)
 
     def transform_officers(self, stock_id: int, df: pd.DataFrame) -> CompanyOfficerSync:
         if df.empty:
             return CompanyOfficerSync(stock_id=stock_id)
+        df = normalize_columns(
+            df,
+            {
+                "officer_name": "name",
+                "officer_position": "position",
+                "officer_own_percent": "ownership_percent",
+                "officer_own_quantity": "quantity",
+                "update_date": "updated_date",
+            },
+            {"name"},
+        )
         records: list[CompanyOfficerRecord] = []
         for _, row in df.iterrows():
             name = _clean_str(row.get("name"))
@@ -158,6 +149,7 @@ class CompanyPandasProcessor(BaseProcessor):
                 continue
             records.append(
                 CompanyOfficerRecord(
+                    data_source_id=record_id(row, df, "officer", name, _clean_str(row.get("position"))),
                     name=name,
                     position=_clean_str(row.get("position")),
                     ownership_percent=_clean_float(row.get("ownership_percent")),
@@ -165,11 +157,12 @@ class CompanyPandasProcessor(BaseProcessor):
                     updated_date=_clean_date(row.get("updated_date")),
                 )
             )
-        return CompanyOfficerSync(stock_id=stock_id, records=records)
+        return CompanyOfficerSync(stock_id=stock_id, items=records)
 
     def transform_affiliations(self, stock_id: int, df: pd.DataFrame) -> CompanyAffiliationSync:
         if df.empty:
             return CompanyAffiliationSync(stock_id=stock_id)
+        df = normalize_columns(df, {"organ_name": "name", "sub_organ_code": "code"}, {"name"})
         records: list[CompanyAffiliationRecord] = []
         for _, row in df.iterrows():
             name = _clean_str(row.get("name"))
@@ -177,17 +170,30 @@ class CompanyPandasProcessor(BaseProcessor):
                 continue
             records.append(
                 CompanyAffiliationRecord(
+                    data_source_id=record_id(row, df, "affiliation", _clean_str(row.get("code")) or name),
                     code=_clean_str(row.get("code")),
                     name=name,
-                    type=_clean_str(row.get("type")),
+                    type={"công ty con": "SUBSIDIARY", "công ty liên kết": "AFFILIATED"}.get(
+                        _clean_str(row.get("type")) or "", _clean_str(row.get("type"))
+                    ),
                     ownership_percent=_clean_float(row.get("ownership_percent")),
                 )
             )
-        return CompanyAffiliationSync(stock_id=stock_id, records=records)
+        return CompanyAffiliationSync(stock_id=stock_id, items=records)
 
     def transform_events(self, stock_id: int, df: pd.DataFrame) -> CompanyEventSync:
         if df.empty:
             return CompanyEventSync(stock_id=stock_id)
+        df = normalize_columns(
+            df,
+            {
+                "event_name": "title",
+                "event_title": "title",
+                "event_list_name": "title",
+                "ex_right_date": "exright_date",
+            },
+            {"title"},
+        )
         records: list[CompanyEventRecord] = []
         for _, row in df.iterrows():
             title = _clean_str(row.get("title"))
@@ -195,19 +201,33 @@ class CompanyPandasProcessor(BaseProcessor):
                 continue
             records.append(
                 CompanyEventRecord(
+                    data_source_id=record_id(
+                        row, df, "event", title, _clean_date(row.get("public_date")), _clean_str(row.get("source_url"))
+                    ),
                     title=title,
-                    public_date=_clean_datetime(row.get("public_date")),
-                    issue_date=_clean_datetime(row.get("issue_date")),
+                    public_date=_clean_date(row.get("public_date")),
+                    issue_date=_clean_date(row.get("issue_date")),
                     source_url=_clean_str(row.get("source_url")),
                     record_date=_clean_date(row.get("record_date")),
                     exright_date=_clean_date(row.get("exright_date")),
                 )
             )
-        return CompanyEventSync(stock_id=stock_id, records=records)
+        return CompanyEventSync(stock_id=stock_id, items=records)
 
     def transform_news(self, stock_id: int, df: pd.DataFrame) -> CompanyNewsSync:
         if df.empty:
             return CompanyNewsSync(stock_id=stock_id)
+        df = normalize_columns(
+            df,
+            {
+                "news_title": "title",
+                "publish_date": "public_date",
+                "publish_time": "public_date",
+                "news_source_link": "source_url",
+                "url": "source_url",
+            },
+            {"title"},
+        )
         records: list[CompanyNewsRecord] = []
         for _, row in df.iterrows():
             title = _clean_str(row.get("title"))
@@ -215,12 +235,15 @@ class CompanyPandasProcessor(BaseProcessor):
                 continue
             records.append(
                 CompanyNewsRecord(
+                    data_source_id=record_id(
+                        row, df, "news", title, _clean_date(row.get("public_date")), _clean_str(row.get("source_url"))
+                    ),
                     title=title,
                     image_url=_clean_str(row.get("image_url")),
                     source_url=_clean_str(row.get("source_url")),
-                    public_date=_clean_datetime(row.get("public_date")),
+                    public_date=_clean_date(row.get("public_date")),
                     language=_clean_str(row.get("language")),
                     price_change_percent=_clean_float(row.get("price_change_percent")),
                 )
             )
-        return CompanyNewsSync(stock_id=stock_id, records=records)
+        return CompanyNewsSync(stock_id=stock_id, items=records)
