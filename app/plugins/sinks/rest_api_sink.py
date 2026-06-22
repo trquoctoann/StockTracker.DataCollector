@@ -61,7 +61,7 @@ class RestApiSink(BaseSink):
         if not items:
             _LOG.info("REST_SINK_SKIP_EMPTY", entity=entity)
             return
-        payload = [m.model_dump(mode="json") for m in items]
+        payload = [m.model_dump(mode="json", exclude_none=True) for m in items]
         await self._post(path, payload)
         _LOG.info("REST_SINK_SENT", entity=entity, count=len(items))
 
@@ -83,7 +83,8 @@ class RestApiSink(BaseSink):
 
     async def send_put(self, path: str, payload: BaseModel) -> None:
         """Send a PUT request with a Pydantic model body to the given path."""
-        body = payload.model_dump(mode="json")
+        # Missing provider fields must not overwrite existing API values with null.
+        body = payload.model_dump(mode="json", exclude_none=True)
         await self._put(path, body)
         _LOG.info("REST_SINK_PUT_SENT", path=path)
 

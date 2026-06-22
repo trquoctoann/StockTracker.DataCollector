@@ -15,7 +15,7 @@ _LOG = structlog.get_logger(__name__)
 class JobScheduler:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._scheduler = AsyncIOScheduler()
+        self._scheduler = AsyncIOScheduler(timezone=settings.scheduler_timezone)
 
     def add_cron_job(
         self,
@@ -24,12 +24,14 @@ class JobScheduler:
         hour: int,
         minute: int,
     ) -> None:
-        trigger = CronTrigger(hour=hour, minute=minute)
+        trigger = CronTrigger(hour=hour, minute=minute, timezone=self._settings.scheduler_timezone)
         self._scheduler.add_job(
             func,
             trigger=trigger,
             id=job_id,
             replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
         _LOG.info("SCHEDULER_JOB_REGISTERED", job_id=job_id, hour=hour, minute=minute)
 

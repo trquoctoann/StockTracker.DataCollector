@@ -7,6 +7,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import Settings
+from app.core.exceptions import SourceError
 from app.core.rate_limiter import RateLimiterRegistry
 from app.engine.keycloak_auth import KeycloakAuthManager
 from app.engine.retry import http_retry
@@ -31,6 +32,7 @@ class _StockApiRow(BaseModel):
 
     id: int
     symbol: str
+    type: str | None = None
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -84,9 +86,13 @@ class StockTrackerApiClient:
         _LOG.info("INDUSTRY_MAP_LOADED", count=len(mapping))
         return mapping
 
-    async def fetch_stock_symbol_to_id(self) -> dict[str, int]:
+    async def fetch_stock_symbol_to_id(self, *, stock_types: set[str] | None = None) -> dict[str, int]:
         raw = await self._get_json(self._settings.api_path_stocks_all)
         rows = [_StockApiRow.model_validate(x) for x in _unwrap_list(raw)]
+        if stock_types is not None:
+            if any(row.type is None for row in rows):
+                raise SourceError("Stock API response is missing asset type; cannot select provider-compatible symbols")
+            rows = [row for row in rows if row.type in stock_types]
         mapping = {r.symbol: r.id for r in rows}
         _LOG.info("STOCK_MAP_LOADED", count=len(mapping))
         return mapping

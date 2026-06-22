@@ -6,7 +6,7 @@ import httpx
 import structlog
 
 from app.core.config import Settings
-from app.core.exceptions import SinkError
+from app.core.exceptions import PipelineError, SinkError
 from app.core.rate_limiter import RateLimiterRegistry
 from app.engine.keycloak_auth import KeycloakAuthManager
 from app.engine.stocktracker_api import StockTrackerApiClient
@@ -39,16 +39,20 @@ async def run_vnstock_market_data(deps: VnstockMarketDataDeps) -> None:
 
     try:
         _LOG.info("VNSTOCK_MARKET_DATA_STEP", step="stock_map_from_api")
-        stock_map = await api.fetch_stock_symbol_to_id()
+        stock_map = await api.fetch_stock_symbol_to_id(stock_types={"STOCK", "ETF"})
 
+        failures = 0
         for symbol, stock_id in stock_map.items():
             _LOG.info("VNSTOCK_MARKET_DATA_STEP", step="processing_stock", symbol=symbol, stock_id=stock_id)
-            try:
-                await _sync_price_history(source, processor, rabbit, settings, symbol, stock_id)
-                await _sync_intraday(source, processor, rabbit, settings, symbol, stock_id)
-            except Exception:
-                _LOG.exception("VNSTOCK_MARKET_DATA_STOCK_FAILED", symbol=symbol, stock_id=stock_id)
-                continue
+            for operation in (_sync_price_history, _sync_intraday):
+                try:
+                    await operation(source, processor, rabbit, settings, symbol, stock_id)
+                except Exception:
+                    failures += 1
+                    _LOG.exception("VNSTOCK_MARKET_DATA_STOCK_FAILED", symbol=symbol, operation=operation.__name__)
+
+        if failures:
+            raise PipelineError(f"Market data pipeline incomplete: {failures} operations failed")
 
         _LOG.info("VNSTOCK_MARKET_DATA_PIPELINE_COMPLETE", total_stocks=len(stock_map))
     finally:

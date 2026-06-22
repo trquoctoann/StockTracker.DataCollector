@@ -29,7 +29,7 @@ class RabbitMQSink(BaseSink):
             return
         await self._rate_limiter.acquire("rabbitmq")
         self._connection = await aio_pika.connect_robust(self._settings.rabbitmq_url)
-        self._channel = await self._connection.channel()
+        self._channel = await self._connection.channel(publisher_confirms=True, on_return_raises=True)
         ex_map = {
             "topic": aio_pika.ExchangeType.TOPIC,
             "direct": aio_pika.ExchangeType.DIRECT,
@@ -58,7 +58,9 @@ class RabbitMQSink(BaseSink):
         ).encode("utf-8")
         routing_key = f"datacollector.{entity}"
         await self._exchange.publish(
-            aio_pika.Message(body=body, content_type="application/json"),
+            aio_pika.Message(
+                body=body, content_type="application/json", delivery_mode=aio_pika.DeliveryMode.PERSISTENT
+            ),
             routing_key=routing_key,
         )
         _LOG.info("RABBIT_SINK_PUBLISHED", entity=entity, count=len(items), routing_key=routing_key)
@@ -75,7 +77,9 @@ class RabbitMQSink(BaseSink):
             ensure_ascii=False,
         ).encode("utf-8")
         await self._exchange.publish(
-            aio_pika.Message(body=body, content_type="application/json"),
+            aio_pika.Message(
+                body=body, content_type="application/json", delivery_mode=aio_pika.DeliveryMode.PERSISTENT
+            ),
             routing_key=routing_key,
         )
         _LOG.info("RABBIT_SINK_MESSAGE_PUBLISHED", routing_key=routing_key)
