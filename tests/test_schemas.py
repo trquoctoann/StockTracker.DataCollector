@@ -60,9 +60,9 @@ def test_stock_symbol_max_length() -> None:
         Stock(symbol="V" * 21, name="Test", exchange="HOSE", type="STOCK")
 
 
-def test_stock_industry_ids_default_empty() -> None:
+def test_stock_industry_ids_default_preserves_existing() -> None:
     s = Stock(symbol="VCB", name="Test", exchange="HOSE", type="STOCK")
-    assert s.industry_ids == []
+    assert s.industry_ids is None
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ def test_price_history_interval_values() -> None:
     assert PriceHistoryInterval.FIVE_MINUTES == "5m"
     assert PriceHistoryInterval.FIFTEEN_MINUTES == "15m"
     assert PriceHistoryInterval.THIRTY_MINUTES == "30m"
-    assert PriceHistoryInterval.ONE_HOUR == "1H"
+    assert PriceHistoryInterval.ONE_HOUR == "1h"
     assert PriceHistoryInterval.ONE_DAY == "1D"
     assert PriceHistoryInterval.ONE_WEEK == "1W"
     assert PriceHistoryInterval.ONE_MONTH == "1M"

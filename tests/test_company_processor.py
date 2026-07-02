@@ -1,7 +1,9 @@
-from datetime import date, datetime
+from datetime import date
 
 import pandas as pd
+import pytest
 
+from app.core.exceptions import SourceError
 from app.plugins.processors.company_processor import CompanyPandasProcessor
 
 
@@ -118,7 +120,7 @@ def test_transform_events() -> None:
     result = proc.transform_events(1, df)
     assert len(result.records) == 1
     assert result.records[0].title == "Đại hội cổ đông"
-    assert result.records[0].public_date == datetime(2026, 3, 15, 9, 0, 0)
+    assert result.records[0].public_date == date(2026, 3, 15)
     assert result.records[0].record_date == date(2026, 3, 1)
 
 
@@ -146,3 +148,79 @@ def test_transform_news_empty() -> None:
     result = proc.transform_news(1, pd.DataFrame())
     assert result.stock_id == 1
     assert len(result.records) == 0
+
+
+def test_kbs_shareholder_mapping_and_stable_identity():
+    df = pd.DataFrame(
+        {
+            "name": ["Example"],
+            "shares_owned": [100],
+            "ownership_percentage": [6.89],
+            "update_date": ["2026-08-27T00:00:00"],
+        }
+    )
+    df.attrs["source"] = "KBS"
+    proc = CompanyPandasProcessor()
+    first = proc.transform_shareholders(1, df).items[0]
+    df.loc[0, "shares_owned"] = 200
+    second = proc.transform_shareholders(1, df).items[0]
+    assert first.quantity == 100
+    assert first.ownership_percent == 6.89
+    assert first.updated_date == date(2026, 8, 27)
+    assert first.data_source_id == second.data_source_id
+
+
+def test_vci_officers_aliases():
+    df = pd.DataFrame(
+        {
+            "officer_name": ["Example"],
+            "officer_position": ["CEO"],
+            "officer_own_percent": [3.5],
+            "officer_own_quantity": [100],
+            "update_date": [pd.NaT],
+        }
+    )
+    item = CompanyPandasProcessor().transform_officers(1, df).items[0]
+    assert (item.name, item.position, item.quantity) == ("Example", "CEO", 100)
+    assert item.updated_date is None
+
+
+def test_kbs_profile_ambiguous_units_are_omitted():
+    df = pd.DataFrame(
+        {
+            "symbol": ["FPT"],
+            "founded_date": ["03/04/2002"],
+            "listed_volume": [1714],
+            "charter_capital": [17413],
+            "branches": ["Two representative offices"],
+            "number_of_employees": [pd.NA],
+        }
+    )
+    df.attrs["source"] = "KBS"
+    item = CompanyPandasProcessor().transform_profile(1, df)
+    assert item.founded_date == date(2002, 4, 3)
+    assert item.listing_volume is None
+    assert item.charter_capital is None
+    assert item.branches is None
+    assert item.number_of_employees is None
+
+
+def test_kbs_news_uses_article_id_and_publish_time():
+    df = pd.DataFrame(
+        {
+            "article_id": [123],
+            "title": ["Example"],
+            "publish_time": ["2026-08-08T11:50:00"],
+            "url": ["/2026/08/example.htm"],
+        }
+    )
+    df.attrs["source"] = "KBS"
+    item = CompanyPandasProcessor().transform_news(1, df).items[0]
+    assert item.data_source_id == "kbs:news:123"
+    assert item.public_date == date(2026, 8, 8)
+    assert item.source_url == "/2026/08/example.htm"
+
+
+def test_company_schema_drift_is_not_an_empty_snapshot():
+    with pytest.raises(SourceError, match="missing columns"):
+        CompanyPandasProcessor().transform_shareholders(1, pd.DataFrame({"unexpected": ["Example"]}))

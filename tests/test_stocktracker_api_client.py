@@ -12,6 +12,9 @@ from app.core.config import Settings
 from app.core.rate_limiter import RateLimiterRegistry
 from app.engine.keycloak_auth import KeycloakAuthManager
 from app.engine.stocktracker_api import StockTrackerApiClient, _unwrap_list
+from app.plugins.sinks.rest_api_sink import RestApiSink
+from app.schemas.company import CompanyProfileSync
+from app.schemas.stock import Stock
 
 # ---------------------------------------------------------------------------
 # _unwrap_list helper
@@ -161,3 +164,26 @@ async def test_put_json_sends_auth_header(
     call_kwargs = http_client.put.call_args.kwargs
     assert "Authorization" in call_kwargs["headers"]
     assert call_kwargs["headers"]["Authorization"] == "Bearer bearer-token"
+
+
+async def test_rest_sink_omits_unavailable_profile_fields(settings, rate_limiter, mock_auth):
+    client = _make_client({})
+    sink = RestApiSink(settings, mock_auth, rate_limiter, client)
+    await sink.send_put("/api/stocks/1/profile/sync", CompanyProfileSync(stock_id=1, symbol="FPT"))
+    assert client.put.call_args.kwargs["json"] == {"stock_id": 1, "symbol": "FPT"}
+
+
+async def test_rest_sink_omits_unknown_icb_but_keeps_explicit_empty(settings, rate_limiter, mock_auth):
+    client = _make_client({})
+    client.post.return_value = client.put.return_value
+    sink = RestApiSink(settings, mock_auth, rate_limiter, client)
+    await sink.send_batch("stocks", [Stock(symbol="FPT", name="FPT", exchange="HSX", type="STOCK")])
+    assert "industry_ids" not in client.post.call_args.kwargs["json"][0]
+    await sink.send_batch("stocks", [Stock(symbol="FPT", name="FPT", exchange="HSX", type="STOCK", industry_ids=[])])
+    assert client.post.call_args.kwargs["json"][0]["industry_ids"] == []
+
+
+async def test_api_stock_type_filter_does_not_request_company_data_for_etfs(settings, rate_limiter, mock_auth):
+    client = _make_client([{"id": 1, "symbol": "FPT", "type": "STOCK"}, {"id": 2, "symbol": "ETF", "type": "ETF"}])
+    api = StockTrackerApiClient(settings, mock_auth, rate_limiter, client)
+    assert await api.fetch_stock_symbol_to_id(stock_types={"STOCK"}) == {"FPT": 1}
