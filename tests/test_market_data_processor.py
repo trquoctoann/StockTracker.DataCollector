@@ -130,7 +130,7 @@ def test_intraday_side_and_nullable_source_id(side, expected):
     )
     record = MarketDataPandasProcessor().transform_intraday(1, df)[0].records[0]
     assert record.match_type == expected
-    assert record.data_source_id == "0"
+    assert record.data_source_id.startswith("vnstock:trade:")
     assert record.time == datetime(2026, 8, 27, 10, 15, 23, 123000)
     assert record.price == 72.5  # vnstock equity prices are already in thousands of VND
 

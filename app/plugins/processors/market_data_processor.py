@@ -8,7 +8,7 @@ import pandas as pd
 
 from app.core.exceptions import SourceError
 from app.interfaces.base_processor import BaseProcessor
-from app.plugins.processors.pandas_utils import clean_datetime, clean_float, clean_str, normalize_columns
+from app.plugins.processors.pandas_utils import clean_datetime, clean_float, clean_str, normalize_columns, record_id
 from app.schemas.market_data import (
     PriceHistoryInterval,
     StockIntradayRecord,
@@ -92,16 +92,19 @@ class MarketDataPandasProcessor(BaseProcessor):
         df = normalize_columns(df, {}, {"time", "price", "volume"})
         records: list[StockIntradayRecord] = []
         for _, row in df.iterrows():
+            timestamp = _parse_datetime(row.get("time"))
+            price = _clean_float(row.get("price"))
+            volume = _clean_float(row.get("volume"))
             side = (clean_str(row.get("match_type")) or "").upper()
             # API supports only directional BUY/SELL. Auction/unknown side is
             # unknown, not a buy or sell; do not poison the consumer with ATO/ATC.
             match_type = {"B": "BUY", "BUY": "BUY", "S": "SELL", "SELL": "SELL"}.get(side)
-            data_source_id = clean_str(row.get("data_source_id")) or clean_str(row.get("id"))
+            data_source_id = record_id(row, df, "trade", timestamp, price, volume, match_type)
             records.append(
                 StockIntradayRecord(
-                    time=_parse_datetime(row.get("time")),
-                    price=_clean_float(row.get("price")),
-                    volume=_clean_float(row.get("volume")),
+                    time=timestamp,
+                    price=price,
+                    volume=volume,
                     match_type=match_type,
                     data_source_id=data_source_id,
                     stock_id=stock_id,
