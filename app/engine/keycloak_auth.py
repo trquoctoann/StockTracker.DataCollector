@@ -33,6 +33,9 @@ class KeycloakAuthManager:
         realm = self._settings.keycloak_realm
         return f"{base}/realms/{realm}/protocol/openid-connect/token"
 
+    def _introspection_url(self) -> str:
+        return f"{self._token_url()}/introspect"
+
     @http_retry
     async def _fetch_token(self) -> dict[str, Any]:
         if not self._settings.keycloak_client_secret:
@@ -68,6 +71,25 @@ class KeycloakAuthManager:
         self._expires_at_monotonic = time.monotonic() + ttl
         _LOG.info("KEYCLOAK_TOKEN_REFRESHED", expires_in=ttl)
         return self._token
+
+    async def introspect(self, token: str) -> dict[str, Any]:
+        if not self._settings.keycloak_client_secret:
+            raise ConfigurationError("keycloak_client_secret is required for token introspection")
+        await self._rate_limiter.acquire("http")
+        response = await self._client.post(
+            self._introspection_url(),
+            data={
+                "token": token,
+                "client_id": self._settings.keycloak_client_id,
+                "client_secret": self._settings.keycloak_client_secret,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ConfigurationError("Keycloak introspection response must be an object")
+        return payload
 
     async def close(self) -> None:
         if self._owns_client:

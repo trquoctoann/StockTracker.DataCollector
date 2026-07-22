@@ -126,6 +126,23 @@ async def test_token_url_format(settings: Settings, rate_limiter: RateLimiterReg
 
 
 @pytest.mark.asyncio
+async def test_introspect_uses_confidential_client_credentials(
+    settings: Settings, rate_limiter: RateLimiterRegistry, mock_http_client: AsyncMock
+) -> None:
+    response = mock_http_client.post.return_value
+    response.json.return_value = {"active": True, "sub": "operator"}
+    manager = KeycloakAuthManager(settings, rate_limiter, client=mock_http_client)
+
+    payload = await manager.introspect("incoming-token")
+
+    assert payload["active"] is True
+    call = mock_http_client.post.call_args
+    assert call.args[0].endswith("/token/introspect")
+    assert call.kwargs["data"]["token"] == "incoming-token"
+    assert call.kwargs["data"]["client_secret"] == "test-secret"
+
+
+@pytest.mark.asyncio
 async def test_close_does_not_close_external_client(
     settings: Settings, rate_limiter: RateLimiterRegistry, mock_http_client: AsyncMock
 ) -> None:

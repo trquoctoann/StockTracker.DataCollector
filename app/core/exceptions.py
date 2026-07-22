@@ -9,6 +9,10 @@ class PipelineError(DataCollectorError):
     pass
 
 
+class PipelineBusyError(PipelineError):
+    pass
+
+
 class ConfigurationError(DataCollectorError):
     pass
 

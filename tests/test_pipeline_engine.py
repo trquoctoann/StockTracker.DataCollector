@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from app.core.exceptions import PipelineError
+from app.core.exceptions import PipelineBusyError, PipelineError
 from app.engine.pipeline import PipelineEngine
 
 
@@ -36,3 +38,20 @@ async def test_pipeline_engine_preserves_cause() -> None:
         await PipelineEngine.run("test_pipeline", _failing_coro)
     assert exc_info.value.__cause__ is not None
     assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_engine_rejects_overlapping_run() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking() -> None:
+        started.set()
+        await release.wait()
+
+    first = asyncio.create_task(PipelineEngine.run("exclusive_pipeline", blocking))
+    await started.wait()
+    with pytest.raises(PipelineBusyError):
+        await PipelineEngine.run("exclusive_pipeline", _success_coro)
+    release.set()
+    await first
