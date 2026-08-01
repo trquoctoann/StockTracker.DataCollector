@@ -10,7 +10,7 @@ from uuid import UUID
 import httpx
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -22,6 +22,7 @@ from app.engine.job_registry import JobRegistry, PipelineJob
 from app.engine.keycloak_auth import KeycloakAuthManager
 from app.engine.pipeline import PipelineEngine
 from app.engine.scheduler import JobScheduler
+from app.middleware.metrics import HttpMetrics, HttpMetricsMiddleware
 from app.pipelines.vnstock_company_pipeline import VnstockCompanyDeps, run_vnstock_company
 from app.pipelines.vnstock_listing_pipeline import VnstockListingDeps, run_vnstock_listing
 from app.pipelines.vnstock_market_data_pipeline import VnstockMarketDataDeps, run_vnstock_market_data
@@ -157,6 +158,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="StockTracker.DataCollector", lifespan=lifespan)
+_metrics = HttpMetrics("DataCollector")
+app.add_middleware(HttpMetricsMiddleware, metrics=_metrics)
 
 
 class PipelineRunResponse(BaseModel):
@@ -184,6 +187,11 @@ async def readiness() -> JSONResponse:
     )
 
 
+@app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
+async def metrics() -> str:
+    return _metrics.render()
+
+
 def _realm_roles(payload: dict[str, object]) -> set[str]:
     realm_access = payload.get("realm_access", {})
     if isinstance(realm_access, str):
@@ -205,7 +213,7 @@ async def require_pipeline_operator(
     payload = await get_auth().introspect(credentials.credentials)
     if payload.get("active") is not True:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, headers={"WWW-Authenticate": "Bearer"})
-    if "system_admin" not in _realm_roles(payload):
+    if "pipeline_operator" not in _realm_roles(payload):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
 
 
