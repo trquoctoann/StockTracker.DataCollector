@@ -24,6 +24,7 @@ _COMPANY_METHODS = {
     "company_events": "events",
     "company_news": "news",
 }
+_KBS_INDEX_ALIASES = {"VNMID": "VNMidCap", "VNSML": "VNSmallCap", "VNINDEX": "HOSE"}
 
 
 @dataclass(frozen=True)
@@ -134,8 +135,7 @@ class VnstockSource(BaseSource):
 
     async def _symbols_by_group(self, group: str) -> pd.Series:
         provider = self._settings.vnstock_indices_source.lower()
-        aliases = {"VNMID": "VNMidCap", "VNSML": "VNSmallCap", "VNINDEX": "HOSE"}
-        provider_group = aliases.get(group, group) if provider == "kbs" else group
+        provider_group = _KBS_INDEX_ALIASES.get(group, group)
         raw = await self._call(
             "symbols_by_group",
             lambda: self._reference().equity.list_by_group(group=provider_group, source=provider),
@@ -149,8 +149,23 @@ class VnstockSource(BaseSource):
             raise SourceError(f"vnstock index {group}: blank constituent symbol")
         return result.drop_duplicates().reset_index(drop=True)
 
+    async def _supported_index_groups(self) -> set[str]:
+        raw = await self._call(
+            "index_groups",
+            lambda: self._reference().index.groups(source=self._settings.vnstock_indices_source.lower()),
+        )
+        frame = self._frame(raw, "index_groups", allow_empty=False)
+        if "group_name" not in frame:
+            raise SourceError("vnstock index_groups: missing group_name column")
+        groups = frame["group_name"].dropna().astype(str).str.strip()
+        supported = {group for group in groups if group}
+        if not supported:
+            raise SourceError("vnstock index_groups: no supported index groups")
+        return supported
+
     async def _build_indices_catalog(self) -> list[IndexBasketRow]:
         groups, metadata = await self._run_in_thread(self._index_metadata)
+        supported = await self._supported_index_groups()
         symbols: dict[str, str | None] = {}
         for group in self._settings.vnstock_index_group_names:
             if group not in groups:
@@ -160,7 +175,12 @@ class VnstockSource(BaseSource):
         for symbol in self._settings.vnstock_extra_index_symbols:
             symbols.setdefault(symbol, None)
         rows = []
+        unsupported = []
         for symbol, group in symbols.items():
+            provider_group = _KBS_INDEX_ALIASES.get(symbol, symbol)
+            if provider_group not in supported:
+                unsupported.append(symbol)
+                continue
             info = metadata.get(symbol, {})
             # Fail atomically instead of publishing an empty/partial basket.
             members = await self._symbols_by_group(symbol)
@@ -173,6 +193,14 @@ class VnstockSource(BaseSource):
                     constituent_symbols=members.tolist(),
                 )
             )
+        if unsupported:
+            _LOG.warning(
+                "VNSTOCK_INDEX_GROUPS_UNSUPPORTED",
+                source=self._settings.vnstock_indices_source,
+                symbols=unsupported,
+            )
+        if not rows:
+            raise SourceError("vnstock index catalog: none of the requested groups are supported")
         return rows
 
     async def _quote_history(

@@ -116,6 +116,7 @@ async def test_failed_index_catalog_is_not_a_partial_snapshot(adapter):
     source._settings.vnstock_index_group_names = ["test"]
     source._settings.vnstock_extra_index_symbols = []
     source._index_metadata = Mock(return_value=({"test": ["VN30", "VN100"]}, {}))
+    reference.index.groups.return_value = pd.DataFrame({"group_name": ["VN30", "VN100"]})
     reference.equity.list_by_group.side_effect = [pd.Series(["FPT"]), ConnectionError("down")]
     with pytest.raises(SourceError, match="symbols_by_group failed"):
         await source.extract(operation="indices_catalog")
@@ -123,11 +124,45 @@ async def test_failed_index_catalog_is_not_a_partial_snapshot(adapter):
 
 async def test_kbs_group_alias_and_duplicate_members(adapter):
     source, reference, _, _ = adapter
-    source._settings.vnstock_indices_source = "KBS"
     reference.equity.list_by_group.return_value = pd.Series([" fpt ", "FPT"])
     result = await source.extract(operation="symbols_by_group", group="VNMID")
     reference.equity.list_by_group.assert_called_once_with(group="VNMidCap", source="kbs")
     assert result.tolist() == ["FPT"]
+
+
+async def test_index_catalog_skips_groups_not_advertised_by_provider(adapter):
+    source, reference, _, _ = adapter
+    source._settings.vnstock_index_group_names = ["test"]
+    source._settings.vnstock_extra_index_symbols = []
+    source._index_metadata = Mock(
+        return_value=(
+            {"test": ["VN30", "VNIT"]},
+            {
+                "VN30": {"name": "VN30", "description": "Top 30"},
+                "VNIT": {"name": "VNIT", "description": "Technology"},
+            },
+        )
+    )
+    reference.index.groups.return_value = pd.DataFrame({"group_name": ["VN30"]})
+    reference.equity.list_by_group.return_value = pd.Series(["FPT"])
+
+    result = await source.extract(operation="indices_catalog")
+
+    assert [basket.symbol for basket in result] == ["VN30"]
+    reference.equity.list_by_group.assert_called_once_with(group="VN30", source="kbs")
+
+
+async def test_index_catalog_fails_when_no_requested_group_is_supported(adapter):
+    source, reference, _, _ = adapter
+    source._settings.vnstock_index_group_names = ["test"]
+    source._settings.vnstock_extra_index_symbols = []
+    source._index_metadata = Mock(return_value=({"test": ["VNIT"]}, {}))
+    reference.index.groups.return_value = pd.DataFrame({"group_name": ["VN30"]})
+
+    with pytest.raises(SourceError, match="none of the requested groups"):
+        await source.extract(operation="indices_catalog")
+
+    reference.equity.list_by_group.assert_not_called()
 
 
 async def test_system_exit_is_converted_inside_worker_thread():

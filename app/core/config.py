@@ -53,7 +53,9 @@ class Settings(BaseSettings):
 
     # vnstock 4.0.7 Unified UI; KBS sectors are NOT ICB classifications.
     vnstock_listing_source: Literal["KBS", "VCI"] = "KBS"
-    vnstock_indices_source: Literal["KBS", "VCI"] = "VCI"
+    # vnstock 4.0.7 exposes index group membership through KBS. VCI's
+    # list_by_group endpoint returns empty data for several advertised groups.
+    vnstock_indices_source: Literal["KBS"] = "KBS"
     vnstock_company_source: Literal["KBS", "VCI"] = "KBS"
     vnstock_quote_source: Literal["KBS", "VCI"] = "KBS"
 

@@ -22,13 +22,13 @@ Nguồn: [PyPI 4.0.7](https://pypi.org/project/vnstock/4.0.7/), [repository chí
 |---|---|---|
 | industries_icb | `Reference().industry.list(source="vci")` | VCI; KBS không cung cấp ICB |
 | symbols_by_exchange | `Reference().equity.list_by_exchange(source=...)` | KBS |
-| symbols_by_group | `Reference().equity.list_by_group(group=..., source=...)` | VCI; KBS có alias VNMID → VNMidCap, VNSML → VNSmallCap |
+| symbols_by_group | `Reference().equity.list_by_group(group=..., source="kbs")` | KBS; alias VNMID → VNMidCap, VNSML → VNSmallCap |
 | company_overview | `Reference().company(symbol).info(source=...)` | KBS |
 | company_shareholders/officers/subsidiaries/events/news | Method cùng tên trên `Reference().company(symbol)` | KBS |
 | quote_history | `Market().equity(symbol).ohlcv(start=..., end=..., interval=..., count=None, source=...)` | KBS |
 | quote_intraday | `Market().equity(symbol).trades(page=..., page_size=..., source=...)` | KBS |
 
-Index metadata vẫn dùng `INDEX_GROUPS/INDICES_INFO` của phiên bản đã pin. Không tự động chuyển nguồn khi lỗi: đổi nguồn có thể đổi schema, units, quota và tập mã hỗ trợ. Không coi danh mục hằng số là bằng chứng mọi nhóm đều lấy được từ mọi provider.
+Index metadata vẫn dùng `INDEX_GROUPS/INDICES_INFO` của phiên bản đã pin, nhưng capability được đọc động từ `Reference().index.groups(source="kbs")`. Chỉ basket có trong capability KBS mới được truy vấn; basket có metadata nhưng provider không hỗ trợ được log và bỏ khỏi snapshot. Nếu một basket được KBS công bố hỗ trợ lại lỗi, cả batch index vẫn thất bại để tránh partial snapshot. `Reference.index.members()` chưa được dùng cho VNMID/VNSML vì wrapper 4.0.7 upper-case alias hỗn hợp và làm KBS từ chối; `equity.list_by_group()` giữ nguyên alias và là method KBS được tài liệu chính thức liệt kê.
 
 SDK được import và gọi trong worker thread khi extract, không import ở startup/health. `SystemExit` từ SDK được đổi thành SourceError ngay trong thread, còn cancellation không bị nuốt. Đây không phải timeout cứng: thread sync đang chạy không thể bị asyncio cưỡng chế dừng; timeout/retry nội bộ SDK vẫn có thể kéo dài job.
 
@@ -98,7 +98,7 @@ Backfill explicit ở Python: `source.extract(operation="quote_history", symbol=
 
 ## 5. Kết quả xác minh
 
-Baseline trước sửa: **63 tests passed**. Kết quả chốt sau sửa: **119 tests passed**, Ruff lint/format đạt, Pyright **0 errors**, `uv lock --check --offline` và `git diff --check` đạt. Test contract với API được chạy, không skip. Các test mới bao gồm dispatch Unified UI, date window, pagination, schema drift, SystemExit/cancellation, source-independent daily key, null handling, stable IDs, snapshot guard, failure propagation, persistent publishing và contract với API thật.
+Baseline trước sửa: **63 tests passed**. Kết quả chốt sau container E2E: **128 tests passed**, Ruff lint/format đạt, Pyright **0 errors**, `uv lock --check --offline` và `git diff --check` đạt. Test contract với API được chạy, không skip. Các test mới bao gồm dispatch Unified UI, capability discovery cho index, date window, pagination, schema drift, SystemExit/cancellation, source-independent daily key, null handling, stable IDs, snapshot guard, failure propagation, persistent publishing và contract với API thật.
 
 Source + transform + JSON smoke ngày 27/08/2026, FPT:
 
@@ -114,9 +114,9 @@ Source + transform + JSON smoke ngày 27/08/2026, FPT:
 | Intraday (smoke page_size=5) | 5 | JSON hợp lệ; cảnh báo cửa sổ bị giới hạn |
 | ICB VCI | 177 | 177 Industry DTO |
 
-Probe độc lập: VN30 VCI có 30 thành phần; events KBS FPT trả DataFrame rỗng. Không gửi snapshot rỗng vào API. Chưa xác nhận contract một event KBS có dữ liệu thực, mọi nhóm chỉ số hoặc mọi source dự phòng.
+Container E2E ngày 30/08/2026 chạy pipeline listing hai lần trên PostgreSQL 17 sạch. Cả hai lần đều hoàn tất với **177 industries, 1.545 stocks, 9 indices và 1.334 index compositions**; lần hai không tạo composition trùng. Chín basket provider hỗ trợ là HNX30, VN100, VN30, VNALL, VNMID, VNSI, VNSML, VNX50 và VNXALL. M2M token đi xuyên Keycloak → Collector/API, worker chuyển poison message sang DLQ, Prometheus scrape đủ target và Alloy gửi log tới Loki.
 
-**Chưa kiểm tra E2E ghi database** vì Docker daemon không chạy. API hiện có lỗi index sync và 8 test auth thất bại từ các thay đổi trước phiên; xem báo cáo kiến trúc. Không coi smoke thành công là toàn hệ thống đã production-ready.
+Events KBS FPT vẫn trả DataFrame rỗng nên không gửi snapshot rỗng vào API. Chưa xác nhận contract một event KBS có dữ liệu thực hoặc source dự phòng. Kết quả E2E không làm hệ thống thành production-ready; raw archive/watermark, distributed scheduler lock, PITR và load test vẫn còn trong roadmap.
 
 ## 6. Trước khi áp dụng vào dữ liệu đang có
 
