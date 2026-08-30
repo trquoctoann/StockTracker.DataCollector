@@ -23,5 +23,4 @@ When the control plane is enabled, the collector records runs, steps, heartbeats
 - [Architecture](docs/architecture.md)
 - [Operations and recovery](docs/operations.md)
 - [vnstock 4.0.7 compatibility contract](docs/vnstock-compatibility.md)
-- [Documentation index and maintenance policy](docs/README.md)
-- [Contribution rules](CONTRIBUTING.md)
+- [Contribution and documentation rules](CONTRIBUTING.md)

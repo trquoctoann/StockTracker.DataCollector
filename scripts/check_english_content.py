@@ -5,7 +5,6 @@ from pathlib import Path
 
 TEXT_SUFFIXES = {
     ".alloy",
-    ".cursorrules",
     ".example",
     ".ini",
     ".json",
