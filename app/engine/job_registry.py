@@ -17,6 +17,8 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    ABANDONED = "abandoned"
 
 
 class PipelineJob(BaseModel):
@@ -35,7 +37,13 @@ class JobRegistry:
         self._tasks: set[asyncio.Task[None]] = set()
         self._pending_pipelines: set[str] = set()
 
-    def submit(self, pipeline: str, factory: Callable[[], Awaitable[None]]) -> PipelineJob:
+    def submit(
+        self,
+        pipeline: str,
+        factory: Callable[[], Awaitable[None]],
+        *,
+        resume_of: UUID | None = None,
+    ) -> PipelineJob:
         if pipeline in self._pending_pipelines or PipelineEngine.is_running(pipeline):
             raise PipelineBusyError(f"Pipeline {pipeline} is already queued or running")
         job = PipelineJob(
@@ -46,7 +54,7 @@ class JobRegistry:
         )
         self._jobs[job.id] = job
         self._pending_pipelines.add(pipeline)
-        task = asyncio.create_task(self._run(job, factory))
+        task = asyncio.create_task(self._run(job, factory, resume_of=resume_of))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job.model_copy(deep=True)
@@ -61,12 +69,28 @@ class JobRegistry:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    async def _run(self, job: PipelineJob, factory: Callable[[], Awaitable[None]]) -> None:
+    async def _run(
+        self,
+        job: PipelineJob,
+        factory: Callable[[], Awaitable[None]],
+        *,
+        resume_of: UUID | None,
+    ) -> None:
         job.status = JobStatus.RUNNING
         job.started_at = datetime.now(UTC)
         try:
-            await PipelineEngine.run(job.pipeline, factory)
+            await PipelineEngine.run(
+                job.pipeline,
+                factory,
+                run_id=job.id,
+                trigger="api",
+                resume_of=resume_of,
+            )
             job.status = JobStatus.COMPLETED
+        except asyncio.CancelledError:
+            job.status = JobStatus.CANCELLED
+            job.error = "pipeline task cancelled"
+            raise
         except Exception as exc:
             job.status = JobStatus.FAILED
             job.error = str(exc)

@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aio-pika",
+    "alembic",
     "apscheduler",
+    "asyncpg",
+    "boto3",
     "fastapi",
     "httpx",
     "pandas",

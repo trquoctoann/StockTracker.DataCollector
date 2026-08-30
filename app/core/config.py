@@ -44,6 +44,24 @@ class Settings(BaseSettings):
     rabbitmq_exchange_type: str = "topic"
     rabbitmq_enabled: bool = False
 
+    # Durable pipeline control plane. The collector owns the `collector`
+    # schema even when it shares a PostgreSQL instance with the API.
+    control_plane_enabled: bool = False
+    control_database_url: str = "postgresql://postgres:postgres@localhost:5432/stocktracker"
+    pipeline_heartbeat_seconds: int = Field(default=30, ge=5)
+    pipeline_stale_after_seconds: int = Field(default=300, ge=30)
+
+    # Immutable raw archive. S3Mock is used by the local lab; the same client
+    # contract works with S3 by leaving endpoint_url unset.
+    raw_archive_enabled: bool = False
+    raw_archive_endpoint_url: str | None = None
+    raw_archive_access_key: str = ""
+    raw_archive_secret_key: str = ""
+    raw_archive_region: str = "us-east-1"
+    raw_archive_bucket: str = "stocktracker-raw"
+    raw_archive_prefix: str = "raw"
+    raw_archive_schema_version: str = "1"
+
     rate_limit_vnstock_per_second: float = Field(default=0.25, gt=0)
     rate_limit_vnstock_burst: int = Field(default=1, ge=1)
     rate_limit_http_per_second: float = 10.0
@@ -108,4 +126,6 @@ class Settings(BaseSettings):
         if self.vnstock_history_start and self.vnstock_history_end:
             if self.vnstock_history_start > self.vnstock_history_end:
                 raise ValueError("VNSTOCK_HISTORY_START must not be after VNSTOCK_HISTORY_END")
+        if self.raw_archive_enabled and not (self.raw_archive_access_key and self.raw_archive_secret_key):
+            raise ValueError("RAW_ARCHIVE_ACCESS_KEY and RAW_ARCHIVE_SECRET_KEY are required when archive is enabled")
         return self

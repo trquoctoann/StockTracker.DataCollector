@@ -21,5 +21,9 @@ class SinkError(DataCollectorError):
     pass
 
 
+class ArchiveError(DataCollectorError):
+    pass
+
+
 class SourceError(DataCollectorError):
     pass
