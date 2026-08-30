@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 import structlog
 
+from app.archive.raw_archive import RawArchive
 from app.core.config import Settings
 from app.core.exceptions import PipelineError, SinkError
 from app.core.rate_limiter import RateLimiterRegistry
 from app.engine.keycloak_auth import KeycloakAuthManager
+from app.engine.pipeline import PipelineEngine
 from app.engine.stocktracker_api import StockTrackerApiClient
 from app.plugins.processors.market_data_processor import MarketDataPandasProcessor
 from app.plugins.sinks.rabbitmq_sink import RabbitMQSink
@@ -23,6 +26,7 @@ class VnstockMarketDataDeps:
     rate_limiter: RateLimiterRegistry
     auth: KeycloakAuthManager
     http_client: httpx.AsyncClient
+    archive: RawArchive | None = None
 
 
 async def run_vnstock_market_data(deps: VnstockMarketDataDeps) -> None:
@@ -32,7 +36,7 @@ async def run_vnstock_market_data(deps: VnstockMarketDataDeps) -> None:
     if not settings.rabbitmq_enabled:
         raise SinkError("Market data pipeline requires rabbitmq_enabled=True")
 
-    source = VnstockSource(settings, deps.rate_limiter)
+    source = VnstockSource(settings, deps.rate_limiter, archive=deps.archive)
     processor = MarketDataPandasProcessor(chunk_size=settings.market_data_chunk_size)
     api = StockTrackerApiClient(settings, deps.auth, deps.rate_limiter, deps.http_client)
     rabbit = RabbitMQSink(settings, deps.rate_limiter)
@@ -45,8 +49,23 @@ async def run_vnstock_market_data(deps: VnstockMarketDataDeps) -> None:
         for symbol, stock_id in stock_map.items():
             _LOG.info("VNSTOCK_MARKET_DATA_STEP", step="processing_stock", symbol=symbol, stock_id=stock_id)
             for operation in (_sync_price_history, _sync_intraday):
+                stream = operation.__name__.removeprefix("_sync_")
                 try:
-                    await operation(source, processor, rabbit, settings, symbol, stock_id)
+                    async with PipelineEngine.step(
+                        f"{stream}:{symbol}", metadata={"symbol": symbol, "stock_id": stock_id, "stream": stream}
+                    ) as should_run:
+                        if should_run:
+                            row_count = await operation(source, processor, rabbit, settings, symbol, stock_id)
+                            await PipelineEngine.put_watermark(
+                                stream,
+                                symbol,
+                                {
+                                    "completed_at": datetime.now(UTC).isoformat(),
+                                    "count": row_count,
+                                    "state": "data" if row_count else "empty",
+                                },
+                                source=settings.vnstock_quote_source,
+                            )
                 except Exception:
                     failures += 1
                     _LOG.exception("VNSTOCK_MARKET_DATA_STOCK_FAILED", symbol=symbol, operation=operation.__name__)
@@ -66,7 +85,7 @@ async def _sync_price_history(
     settings: Settings,
     symbol: str,
     stock_id: int,
-) -> None:
+) -> int:
     interval = settings.vnstock_price_history_interval
     df = await source.extract(operation="quote_history", symbol=symbol, interval=interval)
     chunks = processor.transform_price_history(stock_id, df, interval=interval)
@@ -80,6 +99,7 @@ async def _sync_price_history(
         chunks=len(chunks),
         interval=interval,
     )
+    return len(df)
 
 
 async def _sync_intraday(
@@ -89,7 +109,7 @@ async def _sync_intraday(
     settings: Settings,
     symbol: str,
     stock_id: int,
-) -> None:
+) -> int:
     df = await source.extract(operation="quote_intraday", symbol=symbol)
     chunks = processor.transform_intraday(stock_id, df)
     routing_key = settings.rabbitmq_routing_key_intraday
@@ -101,3 +121,4 @@ async def _sync_intraday(
         symbol=symbol,
         chunks=len(chunks),
     )
+    return len(df)

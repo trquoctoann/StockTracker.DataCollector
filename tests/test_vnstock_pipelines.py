@@ -22,7 +22,7 @@ async def test_market_failure_does_not_skip_intraday_and_is_reported(monkeypatch
     rabbit = AsyncMock()
     monkeypatch.setattr(market, "RabbitMQSink", Mock(return_value=rabbit))
     history = AsyncMock(side_effect=SourceError("history down"))
-    intraday = AsyncMock()
+    intraday = AsyncMock(return_value=0)
     monkeypatch.setattr(market, "_sync_price_history", history)
     monkeypatch.setattr(market, "_sync_intraday", intraday)
     async with httpx.AsyncClient() as client:

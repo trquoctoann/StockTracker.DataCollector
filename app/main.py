@@ -14,11 +14,13 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+from app.archive.raw_archive import RawArchive
+from app.control.store import PipelineStore
 from app.core.config import Settings
 from app.core.exceptions import PipelineBusyError
 from app.core.logger import configure_logging
 from app.core.rate_limiter import RateLimiterRegistry
-from app.engine.job_registry import JobRegistry, PipelineJob
+from app.engine.job_registry import JobRegistry, JobStatus, PipelineJob
 from app.engine.keycloak_auth import KeycloakAuthManager
 from app.engine.pipeline import PipelineEngine
 from app.engine.scheduler import JobScheduler
@@ -37,6 +39,8 @@ _rate_limiter: RateLimiterRegistry | None = None
 _auth: KeycloakAuthManager | None = None
 _http_client: httpx.AsyncClient | None = None
 _scheduler: JobScheduler | None = None
+_pipeline_store: PipelineStore | None = None
+_raw_archive: RawArchive | None = None
 _jobs = JobRegistry()
 _bearer = HTTPBearer(auto_error=False)
 
@@ -75,6 +79,7 @@ def _build_listing_deps() -> VnstockListingDeps:
         rate_limiter=get_rate_limiter(),
         auth=get_auth(),
         http_client=get_http_client(),
+        archive=_raw_archive,
     )
 
 
@@ -84,6 +89,7 @@ def _build_company_deps() -> VnstockCompanyDeps:
         rate_limiter=get_rate_limiter(),
         auth=get_auth(),
         http_client=get_http_client(),
+        archive=_raw_archive,
     )
 
 
@@ -93,30 +99,52 @@ def _build_market_data_deps() -> VnstockMarketDataDeps:
         rate_limiter=get_rate_limiter(),
         auth=get_auth(),
         http_client=get_http_client(),
+        archive=_raw_archive,
     )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global _settings, _rate_limiter, _auth, _http_client, _scheduler
+    global _settings, _rate_limiter, _auth, _http_client, _scheduler, _pipeline_store, _raw_archive
     _settings = Settings()
     _rate_limiter = RateLimiterRegistry(_settings)
     _http_client = httpx.AsyncClient(timeout=_settings.http_timeout_seconds)
     _auth = KeycloakAuthManager(_settings, _rate_limiter, client=_http_client)
 
+    if _settings.control_plane_enabled:
+        _pipeline_store = PipelineStore(_settings.control_database_url)
+        await _pipeline_store.connect()
+        recovered = await _pipeline_store.recover_stale_runs(_settings.pipeline_stale_after_seconds)
+        if recovered:
+            _LOG.warning("PIPELINE_STALE_RUNS_RECOVERED", count=recovered)
+    PipelineEngine.configure(
+        _pipeline_store,
+        heartbeat_seconds=_settings.pipeline_heartbeat_seconds,
+        metrics=_metrics,
+    )
+
+    if _settings.raw_archive_enabled:
+        _raw_archive = RawArchive(_settings, store=_pipeline_store)
+        await _raw_archive.ensure_bucket()
+
     if _settings.scheduler_enabled:
         _scheduler = JobScheduler(_settings)
 
         async def _scheduled_listing() -> None:
-            await PipelineEngine.run("vnstock_listing", lambda: run_vnstock_listing(_build_listing_deps()))
+            await PipelineEngine.run(
+                "vnstock_listing", lambda: run_vnstock_listing(_build_listing_deps()), trigger="schedule"
+            )
 
         async def _scheduled_company() -> None:
-            await PipelineEngine.run("vnstock_company", lambda: run_vnstock_company(_build_company_deps()))
+            await PipelineEngine.run(
+                "vnstock_company", lambda: run_vnstock_company(_build_company_deps()), trigger="schedule"
+            )
 
         async def _scheduled_market_data() -> None:
             await PipelineEngine.run(
                 "vnstock_market_data",
                 lambda: run_vnstock_market_data(_build_market_data_deps()),
+                trigger="schedule",
             )
 
         _scheduler.add_cron_job(
@@ -146,6 +174,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _scheduler.shutdown(wait=False)
         _scheduler = None
     await _jobs.shutdown()
+    PipelineEngine.configure(None, metrics=_metrics)
+    _raw_archive = None
+    if _pipeline_store is not None:
+        await _pipeline_store.close()
+        _pipeline_store = None
     if _auth is not None:
         await _auth.close()
         _auth = None
@@ -168,6 +201,10 @@ class PipelineRunResponse(BaseModel):
     status: str
 
 
+class PipelineRunRequest(BaseModel):
+    resume_from: UUID | None = None
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -181,9 +218,19 @@ async def liveness() -> dict[str, str]:
 @app.get("/health/ready")
 async def readiness() -> JSONResponse:
     ready = _auth is not None and _http_client is not None and not _http_client.is_closed
+    checks = {"http_client": "ok" if ready else "unavailable"}
+    if get_settings().control_plane_enabled:
+        try:
+            if _pipeline_store is None:
+                raise RuntimeError("pipeline store is not initialized")
+            await _pipeline_store.ping()
+            checks["control_database"] = "ok"
+        except Exception:
+            checks["control_database"] = "unavailable"
+            ready = False
     return JSONResponse(
         status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"status": "ready" if ready else "unavailable"},
+        content={"status": "ready" if ready else "unavailable", "checks": checks},
     )
 
 
@@ -217,9 +264,33 @@ async def require_pipeline_operator(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
 
 
-def _submit_pipeline(name: str, factory) -> PipelineRunResponse:
+async def _submit_pipeline(
+    name: str,
+    factory,
+    request: PipelineRunRequest | None,
+) -> PipelineRunResponse:
+    resume_from = request.resume_from if request is not None else None
+    if resume_from is not None:
+        if _pipeline_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Pipeline resume requires the durable control plane",
+            )
+        previous = await _pipeline_store.get_run(resume_from)
+        if previous is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume source run was not found")
+        if previous.pipeline != name:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Run {resume_from} belongs to pipeline {previous.pipeline}",
+            )
+        if previous.status not in {"failed", "cancelled", "abandoned"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Run {resume_from} has status {previous.status} and cannot be resumed",
+            )
     try:
-        job = _jobs.submit(name, factory)
+        job = _jobs.submit(name, factory, resume_of=resume_from)
     except PipelineBusyError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return PipelineRunResponse(job_id=job.id, pipeline=job.pipeline, status=job.status.value)
@@ -231,8 +302,12 @@ def _submit_pipeline(name: str, factory) -> PipelineRunResponse:
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_pipeline_operator)],
 )
-async def run_vnstock_listing_endpoint() -> PipelineRunResponse:
-    return _submit_pipeline("vnstock_listing", lambda: run_vnstock_listing(_build_listing_deps()))
+async def run_vnstock_listing_endpoint(request: PipelineRunRequest | None = None) -> PipelineRunResponse:
+    return await _submit_pipeline(
+        "vnstock_listing",
+        lambda: run_vnstock_listing(_build_listing_deps()),
+        request,
+    )
 
 
 @app.post(
@@ -241,8 +316,12 @@ async def run_vnstock_listing_endpoint() -> PipelineRunResponse:
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_pipeline_operator)],
 )
-async def run_vnstock_company_endpoint() -> PipelineRunResponse:
-    return _submit_pipeline("vnstock_company", lambda: run_vnstock_company(_build_company_deps()))
+async def run_vnstock_company_endpoint(request: PipelineRunRequest | None = None) -> PipelineRunResponse:
+    return await _submit_pipeline(
+        "vnstock_company",
+        lambda: run_vnstock_company(_build_company_deps()),
+        request,
+    )
 
 
 @app.post(
@@ -251,8 +330,12 @@ async def run_vnstock_company_endpoint() -> PipelineRunResponse:
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_pipeline_operator)],
 )
-async def run_vnstock_market_data_endpoint() -> PipelineRunResponse:
-    return _submit_pipeline("vnstock_market_data", lambda: run_vnstock_market_data(_build_market_data_deps()))
+async def run_vnstock_market_data_endpoint(request: PipelineRunRequest | None = None) -> PipelineRunResponse:
+    return await _submit_pipeline(
+        "vnstock_market_data",
+        lambda: run_vnstock_market_data(_build_market_data_deps()),
+        request,
+    )
 
 
 @app.get(
@@ -262,6 +345,18 @@ async def run_vnstock_market_data_endpoint() -> PipelineRunResponse:
 )
 async def get_pipeline_job(job_id: UUID) -> PipelineJob:
     job = _jobs.get(job_id)
+    if job is None and _pipeline_store is not None:
+        record = await _pipeline_store.get_run(job_id)
+        if record is not None:
+            return PipelineJob(
+                id=record.id,
+                pipeline=record.pipeline,
+                status=JobStatus(record.status),
+                submitted_at=record.submitted_at,
+                started_at=record.started_at,
+                finished_at=record.finished_at,
+                error=record.error,
+            )
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return job

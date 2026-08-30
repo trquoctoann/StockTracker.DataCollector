@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 import structlog
 
+from app.archive.raw_archive import RawArchive
 from app.core.config import Settings
 from app.core.exceptions import PipelineError, SourceError
 from app.core.rate_limiter import RateLimiterRegistry
 from app.engine.keycloak_auth import KeycloakAuthManager
+from app.engine.pipeline import PipelineEngine
 from app.engine.stocktracker_api import StockTrackerApiClient
 from app.plugins.processors.company_processor import CompanyPandasProcessor
 from app.plugins.sinks.rest_api_sink import RestApiSink
@@ -23,12 +26,13 @@ class VnstockCompanyDeps:
     rate_limiter: RateLimiterRegistry
     auth: KeycloakAuthManager
     http_client: httpx.AsyncClient
+    archive: RawArchive | None = None
 
 
 async def run_vnstock_company(deps: VnstockCompanyDeps) -> None:
     """Pipeline: fetch company data from vnstock → transform → PUT to StockTracker.API sync endpoints."""
     settings = deps.settings
-    source = VnstockSource(settings, deps.rate_limiter)
+    source = VnstockSource(settings, deps.rate_limiter, archive=deps.archive)
     processor = CompanyPandasProcessor()
     api = StockTrackerApiClient(settings, deps.auth, deps.rate_limiter, deps.http_client)
     rest = RestApiSink(settings, deps.auth, deps.rate_limiter, deps.http_client)
@@ -48,8 +52,19 @@ async def run_vnstock_company(deps: VnstockCompanyDeps) -> None:
     for symbol, stock_id in stock_map.items():
         _LOG.info("VNSTOCK_COMPANY_STEP", step="processing_stock", symbol=symbol, stock_id=stock_id)
         for operation in operations:
+            stream = operation.__name__.removeprefix("_sync_company_")
             try:
-                await operation(source, processor, rest, settings, symbol, stock_id)
+                async with PipelineEngine.step(
+                    f"{stream}:{symbol}", metadata={"symbol": symbol, "stock_id": stock_id, "stream": stream}
+                ) as should_run:
+                    if should_run:
+                        await operation(source, processor, rest, settings, symbol, stock_id)
+                        await PipelineEngine.put_watermark(
+                            stream,
+                            symbol,
+                            {"completed_at": datetime.now(UTC).isoformat(), "state": "data"},
+                            source=settings.vnstock_company_source,
+                        )
             except Exception:
                 failures += 1
                 _LOG.exception("VNSTOCK_COMPANY_STOCK_FAILED", symbol=symbol, operation=operation.__name__)

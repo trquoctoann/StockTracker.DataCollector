@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import structlog
 
+from app.archive.raw_archive import RawArchive
 from app.core.config import Settings
 from app.core.exceptions import SourceError
 from app.core.rate_limiter import RateLimiterRegistry
@@ -43,9 +44,16 @@ class VnstockSource(BaseSource):
     Unit tests and the health endpoint must not initialize the provider.
     """
 
-    def __init__(self, settings: Settings, rate_limiter: RateLimiterRegistry) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        rate_limiter: RateLimiterRegistry,
+        *,
+        archive: RawArchive | None = None,
+    ) -> None:
         self._settings = settings
         self._rate_limiter = rate_limiter
+        self._archive = archive
 
     @staticmethod
     def _reference() -> Any:
@@ -95,6 +103,18 @@ class VnstockSource(BaseSource):
         return raw
 
     async def extract(self, **kwargs: Any) -> Any:
+        result = await self._extract(**kwargs)
+        if self._archive is not None:
+            operation = str(kwargs["operation"])
+            await self._archive.capture(
+                operation,
+                result,
+                source=self._source_for_operation(operation),
+                parameters={key: value for key, value in kwargs.items() if key != "operation"},
+            )
+        return result
+
+    async def _extract(self, **kwargs: Any) -> Any:
         operation = kwargs["operation"]
         if operation == "indices_catalog":
             return await self._build_indices_catalog()
@@ -132,6 +152,19 @@ class VnstockSource(BaseSource):
         if operation == "quote_intraday":
             return await self._quote_intraday(str(kwargs["symbol"]))
         raise SourceError(f"Unknown vnstock operation: {operation}")
+
+    def _source_for_operation(self, operation: str) -> str | None:
+        if operation == "industries_icb":
+            return "VCI"
+        if operation == "symbols_by_exchange":
+            return self._settings.vnstock_listing_source
+        if operation in {"indices_catalog", "symbols_by_group"}:
+            return self._settings.vnstock_indices_source
+        if operation in _COMPANY_METHODS:
+            return self._settings.vnstock_company_source
+        if operation in {"quote_history", "quote_intraday"}:
+            return self._settings.vnstock_quote_source
+        return None
 
     async def _symbols_by_group(self, group: str) -> pd.Series:
         provider = self._settings.vnstock_indices_source.lower()
