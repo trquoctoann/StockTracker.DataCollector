@@ -30,7 +30,7 @@ class VnstockCompanyDeps:
 
 
 async def run_vnstock_company(deps: VnstockCompanyDeps) -> None:
-    """Pipeline: fetch company data from vnstock → transform → PUT to StockTracker.API sync endpoints."""
+    """Fetch company data from vnstock, transform it, and send it to API sync endpoints."""
     settings = deps.settings
     source = VnstockSource(settings, deps.rate_limiter, archive=deps.archive)
     processor = CompanyPandasProcessor()

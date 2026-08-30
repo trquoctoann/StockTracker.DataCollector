@@ -51,7 +51,7 @@ def test_transform_price_history_chunking() -> None:
     )
     proc = MarketDataPandasProcessor(chunk_size=500)
     result = proc.transform_price_history(1, df)
-    assert len(result) == 3  # 1200 / 500 = 2.4 → 3 chunks
+    assert len(result) == 3  # 1200 / 500 = 2.4, rounded up to 3 chunks
     assert len(result[0].records) == 500
     assert len(result[1].records) == 500
     assert len(result[2].records) == 200

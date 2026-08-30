@@ -18,9 +18,9 @@ from app.schemas.stock import Stock
 
 
 def test_industry_valid() -> None:
-    ind = Industry(code="8000", name="Tài chính", level=1)
+    ind = Industry(code="8000", name="Financials", level=1)
     assert ind.code == "8000"
-    assert ind.name == "Tài chính"
+    assert ind.name == "Financials"
     assert ind.level == 1
 
 

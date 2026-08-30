@@ -29,7 +29,7 @@ class VnstockListingDeps:
 
 
 async def run_vnstock_listing(deps: VnstockListingDeps) -> None:
-    """Pipeline: fetch listing data from vnstock → transform → POST to StockTracker.API."""
+    """Fetch listing data from vnstock, transform it, and send it to StockTracker.API."""
     settings = deps.settings
     source = VnstockSource(settings, deps.rate_limiter, archive=deps.archive)
     processor = ListingPandasProcessor()

@@ -173,7 +173,7 @@ class CompanyPandasProcessor(BaseProcessor):
                     data_source_id=record_id(row, df, "affiliation", _clean_str(row.get("code")) or name),
                     code=_clean_str(row.get("code")),
                     name=name,
-                    type={"công ty con": "SUBSIDIARY", "công ty liên kết": "AFFILIATED"}.get(
+                    type={"c\u00f4ng ty con": "SUBSIDIARY", "c\u00f4ng ty li\u00ean k\u1ebft": "AFFILIATED"}.get(
                         _clean_str(row.get("type")) or "", _clean_str(row.get("type"))
                     ),
                     ownership_percent=_clean_float(row.get("ownership_percent")),

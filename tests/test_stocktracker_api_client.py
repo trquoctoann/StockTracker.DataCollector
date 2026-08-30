@@ -92,7 +92,7 @@ def _make_client(response_json: Any) -> AsyncMock:
 async def test_fetch_industry_code_to_id_plain_list(
     settings: Settings, rate_limiter: RateLimiterRegistry, mock_auth: AsyncMock
 ) -> None:
-    """Should parse a plain list of {id, code} rows into a code→id mapping."""
+    """Should parse a plain list of {id, code} rows into a codeid mapping."""
     http_client = _make_client([{"id": 1, "code": "8000"}, {"id": 2, "code": "9000"}])
     api = StockTrackerApiClient(settings, mock_auth, rate_limiter, http_client)
     mapping = await api.fetch_industry_code_to_id()
@@ -130,7 +130,7 @@ async def test_fetch_industry_code_strips_whitespace(
 async def test_fetch_stock_symbol_to_id(
     settings: Settings, rate_limiter: RateLimiterRegistry, mock_auth: AsyncMock
 ) -> None:
-    """Should parse stock list into symbol→id mapping with uppercased symbols."""
+    """Should parse stock list into symbolid mapping with uppercased symbols."""
     http_client = _make_client([{"id": 10, "symbol": "vcb"}, {"id": 20, "symbol": "VIC"}])
     api = StockTrackerApiClient(settings, mock_auth, rate_limiter, http_client)
     mapping = await api.fetch_stock_symbol_to_id()

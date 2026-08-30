@@ -10,7 +10,7 @@ def test_transform_industries() -> None:
     df = pd.DataFrame(
         {
             "icb_code": ["8000", "9000"],
-            "icb_name": ["Tài chính", "Công nghệ"],
+            "icb_name": ["Financials", "Technology"],
             "level": [1, 2],
         }
     )
@@ -25,7 +25,7 @@ def test_transform_stocks_maps_industry() -> None:
     df = pd.DataFrame(
         {
             "symbol": ["VCB"],
-            "organ_name": ["Ngân hàng"],
+            "organ_name": ["Bank"],
             "organ_short_name": ["Vietcombank"],
             "exchange": ["HOSE"],
             "type": ["STOCK"],

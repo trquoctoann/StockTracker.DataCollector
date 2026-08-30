@@ -30,7 +30,7 @@ class VnstockMarketDataDeps:
 
 
 async def run_vnstock_market_data(deps: VnstockMarketDataDeps) -> None:
-    """Pipeline: fetch market data from vnstock → chunk → publish to RabbitMQ."""
+    """Fetch market data from vnstock, split it into chunks, and publish it to RabbitMQ."""
     settings = deps.settings
 
     if not settings.rabbitmq_enabled:

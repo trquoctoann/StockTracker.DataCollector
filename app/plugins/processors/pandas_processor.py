@@ -36,7 +36,7 @@ def _normalize_type(raw: object) -> str:
 
 class ListingPandasProcessor(BaseProcessor):
     def process(self, raw: object, **kwargs: Any) -> object:
-        raise NotImplementedError("Dùng transform_industries / transform_stocks / transform_market_indices")
+        raise NotImplementedError("Use transform_industries, transform_stocks, or transform_market_indices")
 
     def transform_industries(self, df: pd.DataFrame) -> list[Industry]:
         if df.empty:

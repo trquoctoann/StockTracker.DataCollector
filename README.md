@@ -1,8 +1,8 @@
-# StockTracker.DataCollector
+# StockTracker DataCollector
 
-Collector ETL cho StockTracker: vnstock → chuẩn hóa → REST (danh mục/công ty) hoặc RabbitMQ (giá).
+DataCollector extracts Vietnamese market data through the pinned vnstock SDK, validates and transforms provider responses, archives raw payloads, and sends normalized data to StockTracker API or RabbitMQ. It also owns durable pipeline control metadata in the PostgreSQL `collector` schema.
 
-## Phát triển
+## Quick start
 
 ```powershell
 uv sync --frozen --dev
@@ -14,8 +14,14 @@ uv run python scripts/smoke_vnstock.py --symbol FPT
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-Copy `.env.example` sang `.env` và điền thông tin M2M trước khi chạy pipeline ghi dữ liệu. Smoke chỉ đọc nguồn, không gửi đến API/RabbitMQ. Các endpoint `/run/*` và `/run/jobs/*` yêu cầu Bearer token có realm role `pipeline_operator`.
+Copy `.env.example` to `.env` and configure the Keycloak machine client before running a write pipeline. The source smoke test reads and transforms provider data but does not call the API or broker. `/run/*` and `/run/jobs/*` require a Bearer token with the `pipeline_operator` realm role.
 
-Khi bật `CONTROL_PLANE_ENABLED`, collector ghi run, step, heartbeat và watermark vào schema PostgreSQL `collector`. Chạy Alembic của collector trước khi khởi động service. Khi bật `RAW_ARCHIVE_ENABLED`, mọi phản hồi hợp lệ từ nguồn được nén gzip, gắn checksum SHA-256 và lưu vào S3 trước khi transform. Có thể resume run lỗi bằng body `{"resume_from":"<run-id>"}`; các step đã hoàn tất của run cha sẽ được ghi `skipped` và không chạy lại.
+When the control plane is enabled, the collector records runs, steps, heartbeats, watermarks, and raw object manifests. Raw responses are compressed, checksummed, and stored in S3 or S3Mock before transformation. A failed run can resume completed steps with `{"resume_from":"<run-id>"}`.
 
-Xem [hướng dẫn nâng cấp vnstock 4.0.7](docs/vnstock-4-migration.vi.md) để biết API mapping, giới hạn dữ liệu, kiểm thử và các bước áp dụng an toàn. Báo cáo kiến trúc/lộ trình chứng chỉ nằm trong repository Deployment: `docs/architecture-review.vi.md`.
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Operations and recovery](docs/operations.md)
+- [vnstock 4.0.7 compatibility contract](docs/vnstock-compatibility.md)
+- [Documentation index and maintenance policy](docs/README.md)
+- [Contribution rules](CONTRIBUTING.md)

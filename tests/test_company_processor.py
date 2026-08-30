@@ -11,7 +11,7 @@ def test_transform_profile_basic() -> None:
     df = pd.DataFrame(
         {
             "symbol": ["VCB"],
-            "business_model": ["Ngân hàng thương mại"],
+            "business_model": ["Commercial banking"],
             "founded_date": ["2009-06-15"],
             "charter_capital": [47_325_000_000_000],
             "number_of_employees": [20_000],
@@ -24,7 +24,7 @@ def test_transform_profile_basic() -> None:
     result = proc.transform_profile(1, df)
     assert result.stock_id == 1
     assert result.symbol == "VCB"
-    assert result.business_model == "Ngân hàng thương mại"
+    assert result.business_model == "Commercial banking"
     assert result.founded_date == date(2009, 6, 15)
     assert result.charter_capital == 47_325_000_000_000
     assert result.number_of_employees == 20_000
@@ -76,7 +76,7 @@ def test_transform_officers() -> None:
     df = pd.DataFrame(
         {
             "name": ["Nguyen CEO"],
-            "position": ["Chủ tịch HĐQT"],
+            "position": ["Board chair"],
             "ownership_percent": [3.5],
             "quantity": [500_000],
         }
@@ -85,7 +85,7 @@ def test_transform_officers() -> None:
     result = proc.transform_officers(1, df)
     assert len(result.records) == 1
     assert result.records[0].name == "Nguyen CEO"
-    assert result.records[0].position == "Chủ tịch HĐQT"
+    assert result.records[0].position == "Board chair"
     assert result.records[0].ownership_percent == 3.5
 
 
@@ -93,7 +93,7 @@ def test_transform_affiliations() -> None:
     df = pd.DataFrame(
         {
             "code": ["VCBS"],
-            "name": ["CTCP Chứng khoán Vietcombank"],
+            "name": ["Vietcombank Securities"],
             "type": ["SUBSIDIARY"],
             "ownership_percent": [95.0],
         }
@@ -108,7 +108,7 @@ def test_transform_affiliations() -> None:
 def test_transform_events() -> None:
     df = pd.DataFrame(
         {
-            "title": ["Đại hội cổ đông"],
+            "title": ["Annual general meeting"],
             "public_date": ["2026-03-15 09:00:00"],
             "issue_date": [None],
             "source_url": ["https://example.com"],
@@ -119,7 +119,7 @@ def test_transform_events() -> None:
     proc = CompanyPandasProcessor()
     result = proc.transform_events(1, df)
     assert len(result.records) == 1
-    assert result.records[0].title == "Đại hội cổ đông"
+    assert result.records[0].title == "Annual general meeting"
     assert result.records[0].public_date == date(2026, 3, 15)
     assert result.records[0].record_date == date(2026, 3, 1)
 
@@ -127,7 +127,7 @@ def test_transform_events() -> None:
 def test_transform_news() -> None:
     df = pd.DataFrame(
         {
-            "title": ["VCB tăng vốn"],
+            "title": ["VCB capital increase"],
             "image_url": ["https://img.com/a.jpg"],
             "source_url": ["https://news.com/vcb"],
             "public_date": ["2026-04-01"],
@@ -138,7 +138,7 @@ def test_transform_news() -> None:
     proc = CompanyPandasProcessor()
     result = proc.transform_news(1, df)
     assert len(result.records) == 1
-    assert result.records[0].title == "VCB tăng vốn"
+    assert result.records[0].title == "VCB capital increase"
     assert result.records[0].language == "vi"
     assert result.records[0].price_change_percent == 2.5
 

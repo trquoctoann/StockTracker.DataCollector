@@ -43,7 +43,7 @@ class StockIntradayRecord(BaseModel):
     time: datetime
     price: float
     volume: float  # API UpsertStockIntradayCommand uses float
-    match_type: str | None = Field(None, description="BUY or SELL – must match API MatchType enum")
+    match_type: str | None = Field(None, description="BUY or SELL; must match the API MatchType enum")
     data_source_id: str
     stock_id: int
 

@@ -19,7 +19,7 @@ class _IndustryApiRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: int
-    code: str = Field(..., description="Mã ngành ICB")
+    code: str = Field(..., description="ICB industry code")
 
     @field_validator("code", mode="before")
     @classmethod
