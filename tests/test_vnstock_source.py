@@ -1,6 +1,9 @@
 import asyncio
 import builtins
+import os
+import sys
 import threading
+from types import ModuleType
 from unittest.mock import AsyncMock, Mock
 
 import pandas as pd
@@ -9,6 +12,19 @@ import pytest
 from app.core.exceptions import SourceError
 from app.plugins.sources.vnstock_source import VnstockSource
 from tests import make_settings
+
+
+def test_sdk_import_disables_provider_agent_config_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VNSTOCK_DISABLE_AGENT_SETUP", raising=False)
+    monkeypatch.delenv("VNSTOCK_DISABLE_GLOBAL_AGENT", raising=False)
+    provider_module = ModuleType("vnstock")
+    reference = Mock()
+    provider_module.Reference = Mock(return_value=reference)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "vnstock", provider_module)
+
+    assert VnstockSource._reference() is reference
+    assert os.environ["VNSTOCK_DISABLE_AGENT_SETUP"] == "1"
+    assert os.environ["VNSTOCK_DISABLE_GLOBAL_AGENT"] == "1"
 
 
 @pytest.fixture

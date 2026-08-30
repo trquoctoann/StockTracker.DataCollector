@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -56,19 +57,29 @@ class VnstockSource(BaseSource):
         self._archive = archive
 
     @staticmethod
+    def _prepare_sdk_environment() -> None:
+        # The provider package starts a background agent-config writer during import.
+        # A data service must never mutate the project or user-level AI configuration.
+        os.environ["VNSTOCK_DISABLE_AGENT_SETUP"] = "1"
+        os.environ["VNSTOCK_DISABLE_GLOBAL_AGENT"] = "1"
+
+    @staticmethod
     def _reference() -> Any:
+        VnstockSource._prepare_sdk_environment()
         from vnstock import Reference
 
         return Reference()
 
     @staticmethod
     def _market() -> Any:
+        VnstockSource._prepare_sdk_environment()
         from vnstock import Market
 
         return Market()
 
     @staticmethod
     def _index_metadata() -> tuple[dict[str, list[str]], dict[str, Any]]:
+        VnstockSource._prepare_sdk_environment()
         from vnstock import INDEX_GROUPS, INDICES_INFO
 
         return INDEX_GROUPS, INDICES_INFO
