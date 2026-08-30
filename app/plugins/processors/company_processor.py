@@ -4,7 +4,6 @@ from typing import Any
 
 import pandas as pd
 
-from app.interfaces.base_processor import BaseProcessor
 from app.plugins.processors.pandas_utils import (
     clean_date as _clean_date,
 )
@@ -44,11 +43,8 @@ def _safe_get(row: Any, col: str) -> Any:
         return getattr(row, col, None)
 
 
-class CompanyPandasProcessor(BaseProcessor):
+class CompanyPandasProcessor:
     """Transform vnstock Company DataFrames into sync payloads."""
-
-    def process(self, raw: object, **kwargs: Any) -> object:
-        raise NotImplementedError("Use transform_profile / transform_shareholders / transform_officers / etc.")
 
     def transform_profile(self, stock_id: int, df: pd.DataFrame, symbol: str = "") -> CompanyProfileSync:
         if df.empty:

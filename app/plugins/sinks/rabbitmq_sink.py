@@ -11,12 +11,11 @@ from pydantic import BaseModel
 from app.core.config import Settings
 from app.core.exceptions import SinkError
 from app.core.rate_limiter import RateLimiterRegistry
-from app.interfaces.base_sink import BaseSink
 
 _LOG = structlog.get_logger(__name__)
 
 
-class RabbitMQSink(BaseSink):
+class RabbitMQSink:
     def __init__(self, settings: Settings, rate_limiter: RateLimiterRegistry) -> None:
         self._settings = settings
         self._rate_limiter = rate_limiter

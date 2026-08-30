@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pandas as pd
 
 from app.core.exceptions import SourceError
-from app.interfaces.base_processor import BaseProcessor
 from app.plugins.processors.pandas_utils import clean_str as _clean_str
 from app.plugins.sources.vnstock_source import IndexBasketRow
 from app.schemas.industry import Industry
@@ -34,10 +31,7 @@ def _normalize_type(raw: object) -> str:
     return mapping.get(s, s)
 
 
-class ListingPandasProcessor(BaseProcessor):
-    def process(self, raw: object, **kwargs: Any) -> object:
-        raise NotImplementedError("Use transform_industries, transform_stocks, or transform_market_indices")
-
+class ListingPandasProcessor:
     def transform_industries(self, df: pd.DataFrame) -> list[Industry]:
         if df.empty:
             return []

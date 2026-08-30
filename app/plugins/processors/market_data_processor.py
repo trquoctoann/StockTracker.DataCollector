@@ -7,7 +7,6 @@ from typing import Any
 import pandas as pd
 
 from app.core.exceptions import SourceError
-from app.interfaces.base_processor import BaseProcessor
 from app.plugins.processors.pandas_utils import clean_datetime, clean_float, clean_str, normalize_columns, record_id
 from app.schemas.market_data import (
     PriceHistoryInterval,
@@ -40,16 +39,13 @@ def _chunks(items: list[Any], size: int) -> list[list[Any]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-class MarketDataPandasProcessor(BaseProcessor):
+class MarketDataPandasProcessor:
     """Transform vnstock Quote DataFrames into chunked sync payloads for RabbitMQ."""
 
     def __init__(self, chunk_size: int = DEFAULT_CHUNK_SIZE) -> None:
         if chunk_size < 1:
             raise ValueError("chunk_size must be positive")
         self._chunk_size = chunk_size
-
-    def process(self, raw: object, **kwargs: Any) -> object:
-        raise NotImplementedError("Use transform_price_history / transform_intraday")
 
     def transform_price_history(
         self,

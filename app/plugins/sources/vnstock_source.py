@@ -15,7 +15,6 @@ from app.archive.raw_archive import RawArchive
 from app.core.config import Settings
 from app.core.exceptions import SourceError
 from app.core.rate_limiter import RateLimiterRegistry
-from app.interfaces.base_source import BaseSource
 
 _LOG = structlog.get_logger(__name__)
 _COMPANY_METHODS = {
@@ -38,7 +37,7 @@ class IndexBasketRow:
     constituent_symbols: list[str]
 
 
-class VnstockSource(BaseSource):
+class VnstockSource:
     """Adapter for the pinned vnstock Unified UI, isolated from pipeline contracts.
 
     Import and construct the SDK in a worker: vnstock import itself can do I/O.

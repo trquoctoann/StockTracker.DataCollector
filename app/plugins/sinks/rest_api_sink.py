@@ -12,12 +12,11 @@ from app.core.exceptions import SinkError
 from app.core.rate_limiter import RateLimiterRegistry
 from app.engine.keycloak_auth import KeycloakAuthManager
 from app.engine.retry import http_retry
-from app.interfaces.base_sink import BaseSink
 
 _LOG = structlog.get_logger(__name__)
 
 
-class RestApiSink(BaseSink):
+class RestApiSink:
     def __init__(
         self,
         settings: Settings,
