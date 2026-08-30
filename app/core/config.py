@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     keycloak_base_url: str = Field(
         default="http://localhost:8080",
-        description="Base URL Keycloak (realm path thêm sau)",
+        description="Keycloak base URL; the realm path is appended by the client",
     )
     keycloak_realm: str = "stocktracker"
     keycloak_client_id: str = "data-collector-service"
@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     control_database_url: str = "postgresql://postgres:postgres@localhost:5432/stocktracker"
     pipeline_heartbeat_seconds: int = Field(default=30, ge=5)
     pipeline_stale_after_seconds: int = Field(default=300, ge=30)
+    job_history_limit: int = Field(default=1_000, ge=1)
 
     # Immutable raw archive. S3Mock is used by the local lab; the same client
     # contract works with S3 by leaving endpoint_url unset.
@@ -114,11 +115,11 @@ class Settings(BaseSettings):
             "Investment Indices",
             "VNX Indices",
         ],
-        description="Nhóm chỉ số (theo vnstock INDEX_GROUPS); thêm 'HNX30' qua extra index symbols.",
+        description="Index groups from vnstock INDEX_GROUPS; add HNX30 through extra index symbols.",
     )
     vnstock_extra_index_symbols: list[str] = Field(
         default_factory=lambda: ["HNX30"],
-        description="Mã chỉ số bổ sung (vnstock Listing.indices_by_group có thể không có trên mọi phiên bản).",
+        description="Additional index symbols that may be absent from Listing.indices_by_group in some versions.",
     )
 
     @model_validator(mode="after")

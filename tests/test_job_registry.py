@@ -39,3 +39,23 @@ async def test_job_registry_rejects_duplicate_pending_pipeline() -> None:
     release.set()
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_job_registry_prunes_oldest_terminal_jobs() -> None:
+    registry = JobRegistry(max_retained_jobs=2)
+    submitted = []
+
+    async def work() -> None:
+        return None
+
+    for pipeline in ("listing", "company", "market-data"):
+        job = registry.submit(pipeline, work)
+        submitted.append(job)
+        while (current := registry.get(job.id)) is not None and current.finished_at is None:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert registry.get(submitted[0].id) is None
+    assert registry.get(submitted[1].id) is not None
+    assert registry.get(submitted[2].id) is not None

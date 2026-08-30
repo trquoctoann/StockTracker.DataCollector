@@ -28,6 +28,10 @@ class FakeS3Client:
         uploaded = next(item for item in self.objects if item["Bucket"] == Bucket and item["Key"] == Key)
         return {"Body": BytesIO(uploaded["Body"])}
 
+    def head_bucket(self, *, Bucket: str) -> None:
+        if Bucket != "stocktracker-raw":
+            raise RuntimeError("bucket not found")
+
 
 class FakeManifestStore:
     def __init__(self) -> None:
@@ -85,3 +89,18 @@ async def test_raw_archive_requires_pipeline_context() -> None:
 
     with pytest.raises(ArchiveError, match="active pipeline run context"):
         await archive.capture("quote_history", [], source="KBS")
+
+
+@pytest.mark.asyncio
+async def test_raw_archive_ping_checks_configured_bucket() -> None:
+    archive = RawArchive(make_settings(raw_archive_bucket="stocktracker-raw"), client=FakeS3Client())
+
+    await archive.ping()
+
+
+@pytest.mark.asyncio
+async def test_raw_archive_ping_wraps_storage_failure() -> None:
+    archive = RawArchive(make_settings(raw_archive_bucket="missing"), client=FakeS3Client())
+
+    with pytest.raises(ArchiveError, match="bucket is unavailable"):
+        await archive.ping()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from hmac import compare_digest
 from typing import Annotated
 from uuid import UUID
@@ -29,7 +29,7 @@ from app.pipelines.vnstock_company_pipeline import VnstockCompanyDeps, run_vnsto
 from app.pipelines.vnstock_listing_pipeline import VnstockListingDeps, run_vnstock_listing
 from app.pipelines.vnstock_market_data_pipeline import VnstockMarketDataDeps, run_vnstock_market_data
 
-# Configure logging early – must run before any logger is used
+# Configure logging early; it must run before any logger is used.
 configure_logging(json_logs=Settings().log_json)  # noqa: E402
 
 _LOG = structlog.get_logger(__name__)
@@ -62,14 +62,14 @@ def get_rate_limiter() -> RateLimiterRegistry:
 def get_auth() -> KeycloakAuthManager:
     global _auth
     if _auth is None:
-        raise RuntimeError("Auth manager not initialized (app lifespan chưa chạy)")
+        raise RuntimeError("Auth manager is not initialized; the application lifespan has not started")
     return _auth
 
 
 def get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None:
-        raise RuntimeError("HTTP client not initialized (app lifespan chưa chạy)")
+        raise RuntimeError("HTTP client is not initialized; the application lifespan has not started")
     return _http_client
 
 
@@ -105,89 +105,86 @@ def _build_market_data_deps() -> VnstockMarketDataDeps:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global _settings, _rate_limiter, _auth, _http_client, _scheduler, _pipeline_store, _raw_archive
+    global _settings, _rate_limiter, _auth, _http_client, _scheduler, _pipeline_store, _raw_archive, _jobs
     _settings = Settings()
     _rate_limiter = RateLimiterRegistry(_settings)
-    _http_client = httpx.AsyncClient(timeout=_settings.http_timeout_seconds)
-    _auth = KeycloakAuthManager(_settings, _rate_limiter, client=_http_client)
+    _jobs = JobRegistry(_settings.job_history_limit)
+    try:
+        async with AsyncExitStack() as stack:
+            _http_client = await stack.enter_async_context(httpx.AsyncClient(timeout=_settings.http_timeout_seconds))
+            _auth = KeycloakAuthManager(_settings, _rate_limiter, client=_http_client)
 
-    if _settings.control_plane_enabled:
-        _pipeline_store = PipelineStore(_settings.control_database_url)
-        await _pipeline_store.connect()
-        recovered = await _pipeline_store.recover_stale_runs(_settings.pipeline_stale_after_seconds)
-        if recovered:
-            _LOG.warning("PIPELINE_STALE_RUNS_RECOVERED", count=recovered)
-    PipelineEngine.configure(
-        _pipeline_store,
-        heartbeat_seconds=_settings.pipeline_heartbeat_seconds,
-        metrics=_metrics,
-    )
-
-    if _settings.raw_archive_enabled:
-        _raw_archive = RawArchive(_settings, store=_pipeline_store)
-        await _raw_archive.ensure_bucket()
-
-    if _settings.scheduler_enabled:
-        _scheduler = JobScheduler(_settings)
-
-        async def _scheduled_listing() -> None:
-            await PipelineEngine.run(
-                "vnstock_listing", lambda: run_vnstock_listing(_build_listing_deps()), trigger="schedule"
+            if _settings.control_plane_enabled:
+                _pipeline_store = PipelineStore(_settings.control_database_url)
+                await _pipeline_store.connect()
+                stack.push_async_callback(_pipeline_store.close)
+                recovered = await _pipeline_store.recover_stale_runs(_settings.pipeline_stale_after_seconds)
+                if recovered:
+                    _LOG.warning("PIPELINE_STALE_RUNS_RECOVERED", count=recovered)
+            PipelineEngine.configure(
+                _pipeline_store,
+                heartbeat_seconds=_settings.pipeline_heartbeat_seconds,
+                metrics=_metrics,
             )
+            stack.callback(PipelineEngine.configure, None, metrics=_metrics)
+            stack.push_async_callback(_jobs.shutdown)
 
-        async def _scheduled_company() -> None:
-            await PipelineEngine.run(
-                "vnstock_company", lambda: run_vnstock_company(_build_company_deps()), trigger="schedule"
-            )
+            if _settings.raw_archive_enabled:
+                _raw_archive = RawArchive(_settings, store=_pipeline_store)
+                await _raw_archive.ensure_bucket()
 
-        async def _scheduled_market_data() -> None:
-            await PipelineEngine.run(
-                "vnstock_market_data",
-                lambda: run_vnstock_market_data(_build_market_data_deps()),
-                trigger="schedule",
-            )
+            if _settings.scheduler_enabled:
+                _scheduler = JobScheduler(_settings)
 
-        _scheduler.add_cron_job(
-            "vnstock_listing",
-            _scheduled_listing,
-            hour=_settings.scheduler_cron_hour,
-            minute=_settings.scheduler_cron_minute,
-        )
-        _scheduler.add_cron_job(
-            "vnstock_company",
-            _scheduled_company,
-            hour=_settings.scheduler_company_cron_hour,
-            minute=_settings.scheduler_company_cron_minute,
-        )
-        _scheduler.add_cron_job(
-            "vnstock_market_data",
-            _scheduled_market_data,
-            hour=_settings.scheduler_market_data_cron_hour,
-            minute=_settings.scheduler_market_data_cron_minute,
-        )
-        _scheduler.start()
+                async def _scheduled_listing() -> None:
+                    await PipelineEngine.run(
+                        "vnstock_listing", lambda: run_vnstock_listing(_build_listing_deps()), trigger="schedule"
+                    )
 
-    _LOG.info("APP_STARTUP_COMPLETE", scheduler=_settings.scheduler_enabled)
-    yield
+                async def _scheduled_company() -> None:
+                    await PipelineEngine.run(
+                        "vnstock_company", lambda: run_vnstock_company(_build_company_deps()), trigger="schedule"
+                    )
 
-    if _scheduler is not None:
-        _scheduler.shutdown(wait=False)
+                async def _scheduled_market_data() -> None:
+                    await PipelineEngine.run(
+                        "vnstock_market_data",
+                        lambda: run_vnstock_market_data(_build_market_data_deps()),
+                        trigger="schedule",
+                    )
+
+                _scheduler.add_cron_job(
+                    "vnstock_listing",
+                    _scheduled_listing,
+                    hour=_settings.scheduler_cron_hour,
+                    minute=_settings.scheduler_cron_minute,
+                )
+                _scheduler.add_cron_job(
+                    "vnstock_company",
+                    _scheduled_company,
+                    hour=_settings.scheduler_company_cron_hour,
+                    minute=_settings.scheduler_company_cron_minute,
+                )
+                _scheduler.add_cron_job(
+                    "vnstock_market_data",
+                    _scheduled_market_data,
+                    hour=_settings.scheduler_market_data_cron_hour,
+                    minute=_settings.scheduler_market_data_cron_minute,
+                )
+                _scheduler.start()
+                stack.callback(_scheduler.shutdown, wait=False)
+
+            _LOG.info("APP_STARTUP_COMPLETE", scheduler=_settings.scheduler_enabled)
+            yield
+    finally:
         _scheduler = None
-    await _jobs.shutdown()
-    PipelineEngine.configure(None, metrics=_metrics)
-    _raw_archive = None
-    if _pipeline_store is not None:
-        await _pipeline_store.close()
+        _raw_archive = None
         _pipeline_store = None
-    if _auth is not None:
-        await _auth.close()
         _auth = None
-    if _http_client is not None:
-        await _http_client.aclose()
         _http_client = None
-    _rate_limiter = None
-    _settings = None
-    _LOG.info("APP_SHUTDOWN_COMPLETE")
+        _rate_limiter = None
+        _settings = None
+        _LOG.info("APP_SHUTDOWN_COMPLETE")
 
 
 app = FastAPI(title="StockTracker.DataCollector", lifespan=lifespan)
@@ -227,6 +224,15 @@ async def readiness() -> JSONResponse:
             checks["control_database"] = "ok"
         except Exception:
             checks["control_database"] = "unavailable"
+            ready = False
+    if get_settings().raw_archive_enabled:
+        try:
+            if _raw_archive is None:
+                raise RuntimeError("raw archive is not initialized")
+            await _raw_archive.ping()
+            checks["raw_archive"] = "ok"
+        except Exception:
+            checks["raw_archive"] = "unavailable"
             ready = False
     return JSONResponse(
         status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,

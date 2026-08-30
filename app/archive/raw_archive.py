@@ -119,6 +119,17 @@ class RawArchive:
         except Exception as exc:
             raise ArchiveError(f"Unable to initialize raw archive bucket: {exc}") from exc
 
+    async def ping(self) -> None:
+        """Verify that the configured archive bucket is reachable."""
+
+        try:
+            await asyncio.to_thread(
+                self._client.head_bucket,
+                Bucket=self._settings.raw_archive_bucket,
+            )
+        except Exception as exc:
+            raise ArchiveError(f"Raw archive bucket is unavailable: {exc}") from exc
+
     async def capture(
         self,
         operation: str,

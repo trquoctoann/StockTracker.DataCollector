@@ -32,7 +32,10 @@ class PipelineJob(BaseModel):
 
 
 class JobRegistry:
-    def __init__(self) -> None:
+    def __init__(self, max_retained_jobs: int = 1_000) -> None:
+        if max_retained_jobs < 1:
+            raise ValueError("max_retained_jobs must be at least 1")
+        self._max_retained_jobs = max_retained_jobs
         self._jobs: dict[UUID, PipelineJob] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._pending_pipelines: set[str] = set()
@@ -97,3 +100,10 @@ class JobRegistry:
         finally:
             job.finished_at = datetime.now(UTC)
             self._pending_pipelines.discard(job.pipeline)
+            self._prune_terminal_jobs()
+
+    def _prune_terminal_jobs(self) -> None:
+        terminal_job_ids = [job_id for job_id, job in self._jobs.items() if job.finished_at is not None]
+        excess = len(terminal_job_ids) - self._max_retained_jobs
+        for job_id in terminal_job_ids[: max(0, excess)]:
+            self._jobs.pop(job_id, None)

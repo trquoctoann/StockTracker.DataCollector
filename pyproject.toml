@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "stocktracker-datacollector"
 version = "0.1.0"
-description = "Microservice DataCollector — ETL pipeline cho StockTracker"
+description = "Data collection and ETL service for StockTracker"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -38,6 +38,7 @@ packages = ["app"]
 
 [tool.ruff]
 line-length = 120
+extend-exclude = ["*.md"]
 target-version = "py312"
 
 [tool.ruff.lint]
