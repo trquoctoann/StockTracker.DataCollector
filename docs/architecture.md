@@ -1,64 +1,92 @@
-# DataCollector architecture
+# Collector architecture
 
-## Responsibilities
+Source baseline: `c157150`, reviewed 2026-09-05.
 
-DataCollector owns source integration and pipeline execution. It does not own business entities in the main database. The API owns normalized application records; the collector owns operational metadata in the PostgreSQL `collector` schema and raw provider payloads in object storage.
+## Responsibility and layout
+
+The collector extracts provider data, optionally archives the extracted response, transforms it into typed payloads, and delivers it. It owns `collector.pipeline_runs`, `pipeline_steps`, `watermarks`, `raw_objects`, and `collector.alembic_version`. The API owns canonical stock/company/market tables.
 
 ```mermaid
-flowchart LR
-    Scheduler[Scheduler or run API] --> Engine[Pipeline engine]
-    Engine --> Source[vnstock source adapter]
-    Source --> Archive[(S3 raw archive)]
-    Source --> Processor[Typed processors]
-    Processor --> Rest[REST sink]
-    Processor --> AMQP[RabbitMQ sink]
-    Rest --> API[StockTracker API]
-    AMQP --> Worker[API consumer worker]
-    Engine --> Control[(PostgreSQL collector schema)]
+flowchart TD
+    Trigger[Operator HTTP or cron] --> Engine[PipelineEngine]
+    Engine --> Lock[Local lock and optional PostgreSQL lock]
+    Lock --> Source[VnstockSource worker thread]
+    Source --> Archive[Optional S3 raw capture]
+    Source --> Processor[Pandas and Pydantic transformation]
+    Archive --> Processor
+    Processor --> REST[REST catalog and company sink]
+    Processor --> MQ[RabbitMQ market sink]
+    REST --> API[StockTracker.API]
+    MQ --> Worker[API consumer worker]
+    Engine --> State[Run status, checkpoints, observation watermarks]
 ```
 
-## Layering
+| Location | Responsibility |
+| --- | --- |
+| `app/main.py` | Lifespan, dependency construction, health, job/trigger routes, operator auth |
+| `app/engine/pipeline.py` | Exclusion, run context, step status, heartbeat, outcomes |
+| `app/engine/job_registry.py` | In-process submission/tasks and bounded terminal history |
+| `app/engine/scheduler.py` | APScheduler cron setup |
+| `app/engine/keycloak_auth.py` | Client-credentials token cache and token introspection |
+| `app/engine/stocktracker_api.py` | API industry and stock ID lookup |
+| `app/engine/retry.py` | Selected HTTP network-error retries |
+| `app/plugins/sources/vnstock_source.py` | Lazy SDK import, thread isolation, extraction validation |
+| `app/plugins/processors` | Column mapping, identifiers, cleanup, chunking |
+| `app/plugins/sinks` | REST and RabbitMQ delivery |
+| `app/pipelines` | Listing, company and market workflows |
+| `app/schemas` | Transport models independent of the API package |
+| `app/control`, `app/archive` | PostgreSQL operational state and S3 capture/load |
+| `app/core` | Settings, rate limits, errors and logging |
+| `alembic` | Collector schema history |
 
-- `plugins/sources`: provider adapters and source-specific capability handling.
-- `plugins/processors`: schema validation, normalization, IDs, units, and chunking.
-- `plugins/sinks`: authenticated REST and persistent RabbitMQ delivery.
-- `pipelines`: orchestration for listing, company, and market data workflows.
-- `engine`: scheduling, rate limiting, retries, background job tracking, and pipeline state.
-- `control`: PostgreSQL run, step, heartbeat, advisory lock, watermark, and manifest access.
-- `archive`: immutable gzip JSON envelopes and checksum-verified replay.
+## Pipeline workflows
 
-## Pipeline lifecycle
+Listing (`vnstock_listing`) extracts VCI ICB industries and POSTs them to API. It fetches the resulting industry ID map, transforms the selected provider's listings and POSTs stocks. It then fetches stock IDs, builds supported index baskets, checks that every constituent resolves, and POSTs index metadata/memberships. Checkpoints are `industries.sync`, `stocks.sync`, and `market_indices.sync`. Reference maps are reloaded even when earlier steps are skipped. Failure aborts this pipeline.
 
-1. An API request or schedule selects a pipeline and creates a run ID.
-2. The engine obtains a local process lock and a PostgreSQL advisory lock for the pipeline name.
-3. The run is persisted and a heartbeat task starts.
-4. Each source operation is recorded as a step. Completed parent steps can be skipped during resume.
-5. A valid provider response is archived before transformation. The envelope includes run, pipeline, operation, source, parameters, capture time, payload format, and schema version.
-6. Processors reject missing required columns, invalid timestamps, non-finite values, negative values where forbidden, and unsafe empty snapshots.
-7. REST sinks use Keycloak client credentials. Market data is published as persistent AMQP messages with publisher confirms.
-8. A watermark advances only after the sink confirms success. Source or sink failure preserves the previous cursor.
-9. The run finishes as completed, failed, cancelled, or abandoned. Startup recovery marks stale running records abandoned.
+Company (`vnstock_company`) selects STOCK assets and runs profile, shareholders, officers, affiliations, events and news sequentially per symbol. Checkpoints are `<stream>:<symbol>`, such as `shareholders:FPT`. It rejects empty source snapshots and collection transformations that drop rows. Each failure is counted while unrelated operations continue; any failure makes the final run failed. Shareholders/officers/affiliations reconcile snapshots in API; events/news retain historical rows. The six operations are not one atomic transaction.
 
-## Concurrency and memory
+Market (`vnstock_market_data`) requires RabbitMQ and selects STOCK/ETF assets. For each stock it fetches history and recent trades, transforms them into chunks (default 500), and publishes each chunk. Checkpoints are `price_history:<symbol>` and `intraday:<symbol>`. A count/time/state watermark is written after all publishes for that operation. Other stocks continue after failures, but the final run fails if any operation failed.
 
-PipelineEngine prevents duplicate work within one process. PostgreSQL advisory locks prevent the same pipeline from running concurrently across collector instances. API-submitted jobs are retained in memory only up to `JOB_HISTORY_LIMIT`; durable run history remains available from PostgreSQL.
+Publication success does not wait for consumer persistence. A completed market step can still have queued or dead-lettered messages. Watermarks record observations/publication, not acknowledged database positions; source history fetches do not read them as cursors.
 
-APScheduler remains in the web process and is suitable for the local lab. Kubernetes CronJob, EventBridge Scheduler, or another external scheduler should own durable production schedules. Advisory locks remain useful as a second concurrency barrier.
+## Jobs, locks, and resume
 
-## Data safety rules
+HTTP submission returns 202 with an in-memory pending job ID. JobRegistry schedules an asyncio task, marks it running and calls the engine. Same-process pending/running duplicates produce 409. The optional PostgreSQL store adds a session advisory lock for each pipeline name. A competing process can receive 202 and then fail when it tries to acquire that lock.
 
-- Empty, partial, or schema-invalid listing snapshots never trigger destructive reconciliation.
-- Provider IDs are namespaced; deterministic fallback IDs use stable business keys.
-- Missing optional fields remain absent rather than becoming zero, an epoch, or an empty deletion request.
-- News and events use append/upsert semantics because provider windows may be incomplete.
-- Daily, weekly, and monthly candle timestamps are normalized to stable local period keys.
-- Equity prices use the units returned by vnstock, currently thousands of VND for the tested providers.
-- Delivery is at least once. Database uniqueness and idempotent sinks are required; exactly-once delivery is not claimed.
+```mermaid
+stateDiagram-v2
+    [*] --> pending: HTTP registry
+    pending --> running: task starts
+    running --> completed: operations succeed
+    running --> failed: operation failure
+    running --> cancelled: task cancelled
+    running --> abandoned: stale heartbeat found at startup
+```
 
-## Health and observability
+Durable `start_run` inserts a running record after lock acquisition. Pending submissions are not durable. Scheduled runs call the engine directly and have no HTTP registry job. HTTP job lookup first checks the registry and then the durable store.
 
-`/health/live` reports process liveness. `/health/ready` verifies the HTTP client, control database, and raw archive when enabled. `/metrics` reports HTTP traffic, run states, duration, and latest successful pipeline time. Logs include pipeline and run identifiers and are suitable for Loki ingestion.
+Heartbeat defaults to 30 seconds. Startup marks running records older than the stale threshold abandoned; recovery is not periodic. Early restart can strand younger interrupted records [C05](review.md#c05).
 
-## Current boundaries
+Resume creates a new run referencing a failed/cancelled/abandoned parent from the same pipeline. Only the parent's completed steps are skipped. Skipped steps are stored as skipped and are lost from the next resume's completed set [C03](review.md#c03). Resume uses current settings and current provider responses; it is not a frozen replay of the old run.
 
-The pinned public vnstock package is an external dependency with changing schemas and provider availability. Thread-based SDK calls cannot be forcibly stopped after cancellation. The RabbitMQ path has no local outbox, and the raw archive local profile uses S3Mock. Production work still includes managed object storage, encryption and lifecycle rules, a durable scheduler, complete data quality reports, PITR, and load or chaos measurements.
+## Raw archive
+
+Capture runs after extraction returns and before delivery. DataFrames use pandas table JSON, Series become list JSON, and other supported payloads use JSON. Metadata records pipeline/run/operation/source/schema version/capture time/parameters/state. The envelope is checksummed before gzip and uploaded under a unique run/date/capture key. If configured, the control store indexes it after upload.
+
+Upload and indexing are separate writes: indexing failure may leave an orphan object. Unique keys provide append-style capture, but the deployment does not configure S3 Object Lock. Errors raised before extraction returns are not archived.
+
+`RawArchive.load` decompresses, optionally validates a provided checksum, and reconstructs payload types. There is no HTTP replay endpoint or automatic re-ingestion workflow. DataFrame attrs are lost [C02](review.md#c02), so direct replay can change record identity and KBS-specific unit handling.
+
+## Scheduling and lifecycle
+
+Cron is disabled by default. When enabled, daily local times are listing 06:00, company 07:00, and market 18:00 in Asia/Ho_Chi_Minh. There is no trading-calendar rule or cross-pipeline dependency barrier. Cron jobs use max_instances=1 and coalescing; different pipelines use different locks.
+
+The rate-limiter registry shares per-process buckets for vnstock, HTTP, and RabbitMQ. vnstock defaults to 0.25 calls/second and burst 1. These are not distributed quotas. SDK calls run through asyncio.to_thread; cancelling an await does not stop an already executing blocking SDK call.
+
+Lifespan creates an HTTP client/auth manager, optionally connects control storage and prepares the archive bucket, then starts cron. Exit stops scheduling, cancels HTTP-submitted jobs, resets engine state, and closes store/HTTP resources.
+
+Selected HTTP calls retry network/transport errors up to five attempts using exponential backoff. HTTP 429/5xx responses are not retried by that policy. HTTP 401 does not trigger automatic token refresh. Source extraction has no matching retry decorator.
+
+## Verification boundary
+
+The 141 passing tests cover processor/schema/adapter fakes, jobs, auth clients, pipelines, archive, readiness and metrics. The Deployment smoke checks real control state and S3-compatible round-trip when Docker is available. It does not establish provider -> API/broker -> canonical database correctness. [Review](review.md) records confirmed defects and coverage gaps.
